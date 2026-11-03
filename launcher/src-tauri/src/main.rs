@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Linux builds leave the Windows-only paths (Windows tool lookup, starting pkp.exe directly) unused.
+#![cfg_attr(unix, allow(dead_code, unused_variables))]
 
 mod dlss;
 mod dump;
 mod gamebuild;
 mod ini;
 mod nup;
+#[cfg(unix)]
+mod linux;
 mod play;
 mod settings;
 mod shaders;
@@ -50,10 +54,24 @@ fn exe_dir() -> PathBuf {
 
 fn game_dir_of(cfg: &Config) -> PathBuf {
     if cfg.game_dir.trim().is_empty() {
-        exe_dir()
+        // Windows: the launcher sits next to pkp.exe. Linux: the AppImage is read-only and mounted somewhere temporary, so
+        // the game gets its own folder.
+        #[cfg(unix)]
+        return linux::default_game_dir();
+        #[cfg(not(unix))]
+        return exe_dir();
     } else {
         PathBuf::from(cfg.game_dir.trim())
     }
+}
+
+/// The release's tools/ folder (pkp_build.py, the lifter, the SDK, extract_corpus.py): next to the launcher on Windows, in
+/// the game folder on Linux (installed there from the release zip).
+fn release_tools(cfg: &Config) -> PathBuf {
+    #[cfg(unix)]
+    return game_dir_of(cfg).join("tools");
+    #[cfg(not(unix))]
+    return exe_dir().join("tools");
 }
 
 #[derive(Serialize)]
@@ -61,6 +79,14 @@ struct Overview {
     game_dir: String,
     default_game_dir: String,
     exe_exists: bool,
+    /// "linux" or "windows"
+    platform: String,
+    /// Linux: the release's files are installed in the game folder (always true on Windows)
+    release_installed: bool,
+    /// Linux: shaders the game recorded as missing, waiting for a refresh
+    missing_shaders: usize,
+    /// Linux: steam_shortcut.py status (null when unknown)
+    steam: serde_json::Value,
 }
 
 #[tauri::command]
@@ -78,10 +104,22 @@ fn save_config(app: AppHandle, config: Config) -> Result<(), String> {
 fn get_overview(app: AppHandle) -> Overview {
     let cfg = load_config(&app);
     let dir = game_dir_of(&cfg);
+    #[cfg(unix)]
+    let (platform, release_installed, missing_shaders, steam, default_dir) = {
+        let lt = linux::tools(&app);
+        let steam = if dir.join("pkp.exe").is_file() { linux::steam_status(&lt, &dir) } else { serde_json::Value::Null };
+        ("linux", linux::release_installed(&dir), linux::missing_shaders(&dir), steam, linux::default_game_dir())
+    };
+    #[cfg(not(unix))]
+    let (platform, release_installed, missing_shaders, steam, default_dir) = ("windows", true, 0, serde_json::Value::Null, exe_dir());
     Overview {
         game_dir: dump::fwd(&dir),
-        default_game_dir: dump::fwd(&exe_dir()),
+        default_game_dir: dump::fwd(&default_dir),
         exe_exists: dir.join("pkp.exe").is_file(),
+        platform: platform.into(),
+        release_installed,
+        missing_shaders,
+        steam,
     }
 }
 
@@ -153,11 +191,12 @@ fn save_dump(app: AppHandle, path: String) -> Result<dump::DumpReport, String> {
     let mut cfg = load_config(&app);
     cfg.dump_dir = report.path.clone();
     save_config(app.clone(), cfg.clone())?;
+    let gd = game_dir_of(&cfg);
     settings::apply(
-        &game_dir_of(&cfg),
+        &gd,
         &[
-            settings::Edit { file: "pkp".into(), section: "fs".into(), key: "exefs".into(), value: settings::portable(&game_dir_of(&cfg), &chosen.exefs) },
-            settings::Edit { file: "pkp".into(), section: "fs".into(), key: "romfs".into(), value: settings::portable(&game_dir_of(&cfg), &chosen.romfs) },
+            settings::Edit { file: "pkp".into(), section: "fs".into(), key: "exefs".into(), value: settings::game_path_in(&gd, &chosen.exefs) },
+            settings::Edit { file: "pkp".into(), section: "fs".into(), key: "romfs".into(), value: settings::game_path_in(&gd, &chosen.romfs) },
         ],
     )?;
     Ok(report)
@@ -188,7 +227,7 @@ fn play(app: AppHandle) -> Result<(), String> {
         (chosen.exefs, chosen.romfs)
     };
     let dir = game_dir_of(&cfg);
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = release_tools(&cfg);
     if gamebuild::is_package_b(&tools_dir) {
         match gamebuild::built_state(&dir, &tools_dir) {
             gamebuild::Built::Current => {}
@@ -200,7 +239,22 @@ fn play(app: AppHandle) -> Result<(), String> {
         return Err("Finish the shader setup first (Game files, Set up).".into());
     }
     settings::ensure_play_paths(&dir, &exefs, &romfs)?;
-    play::start(&app, &dir, cfg.minimize_on_play)
+    #[cfg(unix)]
+    return play_linux(&app, &dir);
+    #[cfg(not(unix))]
+    return play::start(&app, &dir, cfg.minimize_on_play);
+}
+
+/// Linux Play: translate any shaders the game recorded as missing, then start it through Steam (Proton) or Wine.
+#[cfg(unix)]
+fn play_linux(app: &AppHandle, dir: &std::path::Path) -> Result<(), String> {
+    let lt = linux::tools(app);
+    if linux::missing_shaders(dir) > 0 {
+        linux::refresh(&lt, dir)?;
+    }
+    let message = linux::play(&lt, dir)?;
+    play::set_status(app, play::Status { state: "idle".into(), message, ..Default::default() });
+    Ok(())
 }
 
 /// Shader setup: the running job's progress and its cancel flag.
@@ -228,7 +282,7 @@ fn setup_status(app: AppHandle, state: State<Arc<SetupState>>) -> SetupStatus {
     if progress.state.is_empty() {
         progress.state = "idle".into();
     }
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = release_tools(&load_config(&app));
     let state = if gamebuild::is_package_b(&tools_dir) { gamebuild::built_state(&dir, &tools_dir) } else { gamebuild::Built::Current };
     let started = !shaders::read_marker(&dir).romfs.is_empty() || dir.join("build").join("state.json").is_file();
     SetupStatus {
@@ -247,7 +301,13 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), Stri
     let report = dump::scan(&cfg.dump_dir);
     let chosen = report.chosen.ok_or_else(|| "Choose usable game files first.".to_string())?;
     let dir = game_dir_of(&cfg);
-    let tools_dir = exe_dir().join("tools");
+    let tools_dir = release_tools(&cfg);
+    #[cfg(unix)]
+    if !linux::release_installed(&dir) {
+        return Err(format!("The Pokopia Recomp files are not in {} yet: press Install on the Game files page first.", dump::fwd(&dir)));
+    }
+    #[cfg(unix)]
+    let lt = linux::tools(&app);
     let package_b = gamebuild::is_package_b(&tools_dir);
     if !package_b && !dir.join("pkp.exe").is_file() {
         return Err(format!("pkp.exe was not found in {}. Put the launcher next to pkp.exe or set the game folder in Settings.", dump::fwd(&dir)));
@@ -273,6 +333,9 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), Stri
         let result = (|| {
             // no build yet, or one from an older release (stale tools stamp): build pkp.exe (again)
             if package_b && !gamebuild::is_built(&build_job.game_dir, &tools_dir) {
+                #[cfg(unix)]
+                let tools = gamebuild::find_tools_linux(&tools_dir, &lt)?;
+                #[cfg(not(unix))]
                 let tools = gamebuild::find_tools(&tools_dir)?;
                 let built = gamebuild::run(&build_job, &tools, &st.cancel, |t| {
                     emit(shaders::Progress { state: "running".into(), phase: t.phase, done: t.done, total: t.total, message: t.message })
@@ -281,6 +344,9 @@ fn start_setup(app: AppHandle, state: State<Arc<SetupState>>) -> Result<(), Stri
                     return Ok(false);
                 }
             }
+            #[cfg(unix)]
+            let tools = shaders::find_tools_linux(&tools_dir, &lt)?;
+            #[cfg(not(unix))]
             let tools = shaders::find_tools(&tools_dir)?;
             // a finished cache of the same romfs has nothing left to translate (re-extracting would only find that out)
             let same = shaders::read_marker(&job.game_dir).romfs == job.romfs.to_string_lossy().replace('\\', "/");
@@ -355,6 +421,51 @@ fn open_game_dir(app: AppHandle) -> Result<(), String> {
 }
 
 
+/// Linux: installs the official release's files into the game folder (fetch_release.py), with "release-progress" events.
+#[tauri::command]
+async fn install_release(app: AppHandle, zip: Option<String>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let dir = game_dir_of(&load_config(&app));
+        let lt = linux::tools(&app);
+        return tauri::async_runtime::spawn_blocking(move || {
+            linux::install_release(&lt, &dir, zip.as_deref(), |done, total, message| {
+                let _ = app.emit("release-progress", shaders::Progress { state: "running".into(), phase: "install".into(), done, total, message });
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    return { let _ = (app, zip); Err("Only needed on Linux.".into()) };
+}
+
+/// Linux: adds pkp.exe to Steam as a non-Steam game with Proton (closes Steam first if it is running).
+#[tauri::command]
+async fn steam_add(app: AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(unix)]
+    {
+        let dir = game_dir_of(&load_config(&app));
+        let lt = linux::tools(&app);
+        return tauri::async_runtime::spawn_blocking(move || linux::steam_add(&lt, &dir)).await.map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    return { let _ = app; Err("Only needed on Linux.".into()) };
+}
+
+/// Linux: translates the shaders the game recorded as missing and adds them to the cache.
+#[tauri::command]
+async fn refresh_shaders(app: AppHandle) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        let dir = game_dir_of(&load_config(&app));
+        let lt = linux::tools(&app);
+        return tauri::async_runtime::spawn_blocking(move || linux::refresh(&lt, &dir)).await.map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    return { let _ = app; Err("Only needed on Linux.".into()) };
+}
+
 /// Test runs only (PKP_LAUNCHER_EVAL_FILE set): the page writes a result next to the eval file, <file>.out.
 #[tauri::command]
 fn test_report(text: String) -> Result<(), String> {
@@ -404,6 +515,9 @@ fn main() {
             game_status,
             open_game_file,
             open_game_dir,
+            install_release,
+            steam_add,
+            refresh_shaders,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the launcher");

@@ -7,6 +7,25 @@ listen('dlss-progress', (ev) => dlssHandler && dlssHandler(ev.payload));
 let nupHandler = null;
 listen('nup-progress', (ev) => nupHandler && nupHandler(ev.payload));
 
+let releaseHandler = null;
+listen('release-progress', (ev) => releaseHandler && releaseHandler(ev.payload));
+
+// Linux: the game folder gets the official release's files first (the AppImage carries only the Linux tools).
+function releaseHtml(ov, busy, p) {
+  if (ov.platform !== 'linux' || (ov.release_installed && !busy)) return '';
+  const pct = p && p.total ? Math.min(100, Math.floor((100 * p.done) / p.total)) : 0;
+  return `
+    <div class="card" id="release-card">
+      <h2>${icon('hard-drive')}Install Pokopia Recomp</h2>
+      <div class="stack">
+        <p class="dim">Downloads the official Pokopia Recomp 0.1.1 release from its GitHub page (170 MB, checked against a fixed hash) and installs it into the game folder below. Windows-only tools in it are left out; this launcher brings Linux builds of them. Change the folder in Settings.</p>
+        <div class="path">${esc(ov.game_dir)}</div>
+        ${busy ? `<p class="dim">${esc(p?.message || 'Starting...')}</p><progress max="100" value="${pct}"></progress>` : ''}
+        <div class="row"><button class="btn primary" id="release-install" ${busy ? 'disabled' : ''}>${icon('hard-drive')}Install</button></div>
+      </div>
+    </div>`;
+}
+
 function candidateHtml(c, chosen) {
   const title = c.kind === 'base' ? 'Base game' : `Update ${esc(c.version)}`;
   const used = chosen && chosen.path === c.path;
@@ -91,6 +110,9 @@ function nupMsg(p) {
 
 export async function render(el, ctx) {
   const cfg = await api('get_config');
+  let ov = await api('get_overview');
+  let releaseBusy = false;
+  let releaseProgress = null;
   let path = cfg.dump_dir || '';
   let saved = path;
   let report = path ? await api('validate_dump', { path }) : null;
@@ -110,11 +132,13 @@ export async function render(el, ctx) {
           <p class="dim">Pokopia Launcher does not include the game. You need your own legally dumped copy, already decrypted. The launcher only reads this folder and never writes to it (a .nup is unpacked into its own copy).</p>
         </div>
 
+        ${releaseHtml(ov, releaseBusy, releaseProgress)}
+
         <div class="card">
           <h2>${icon('folder-search')}Dump folder</h2>
           <div class="stack">
             <div class="row">
-              <input type="text" id="path" spellcheck="false" placeholder="C:/path/to/Pokopia_dump" value="${esc(path)}" />
+              <input type="text" id="path" spellcheck="false" placeholder="${ov.platform === 'linux' ? '/path/to/Pokopia_dump' : 'C:/path/to/Pokopia_dump'}" value="${esc(path)}" />
               <button class="btn" id="browse" ${nupBusy ? 'disabled' : ''}>${icon('folder-open')}Browse</button>
               <button class="btn" id="browse-nup" ${nupBusy ? 'disabled' : ''}>${icon('file-archive')}.nup</button>
             </div>
@@ -132,7 +156,7 @@ export async function render(el, ctx) {
           ${ctx.firstRun ? '' : '<button class="btn quiet" id="cancel">Back</button>'}
         </div>
 
-        ${shadersHtml(setup, ok && saved === path)}
+        ${shadersHtml(setup, ok && saved === path && ov.release_installed)}
 
         ${dlssHtml(dlss, dlssBusy, dlssProgress)}
       </div>`;
@@ -190,6 +214,20 @@ export async function render(el, ctx) {
       }
     });
     el.querySelector('#setup-cancel')?.addEventListener('click', () => api('cancel_setup'));
+    el.querySelector('#release-install')?.addEventListener('click', async () => {
+      releaseBusy = true;
+      releaseProgress = null;
+      draw();
+      try {
+        await api('install_release', { zip: null });
+        toast('Pokopia Recomp is installed. Next: choose your game files and press Set up.', 'ok');
+      } catch (e) {
+        toast(errText(e), 'error');
+      }
+      releaseBusy = false;
+      ov = await api('get_overview');
+      draw();
+    });
     el.querySelector('#dlss-get')?.addEventListener('click', async () => {
       dlssBusy = true;
       dlssProgress = null;
@@ -214,6 +252,15 @@ export async function render(el, ctx) {
       msg.textContent = nupMsg(p);
       const bar = msg.nextElementSibling;
       if (bar) bar.value = nupPct(p);
+    }
+  };
+
+  releaseHandler = (p) => {
+    releaseProgress = p;
+    const card = el.querySelector('#release-card');
+    if (card && releaseBusy) {
+      card.outerHTML = releaseHtml(ov, true, p);
+      refreshIcons();
     }
   };
 

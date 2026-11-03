@@ -20,6 +20,9 @@ use std::time::Duration;
 pub struct Tools {
     pub python: PathBuf,
     pub script: PathBuf,
+    /// Linux: `_build --script <release pkp_build.py> --zig <Linux Zig>` for pkp_linux.py, which runs the release's script
+    /// unchanged with the Linux build of the same Zig. Empty on Windows.
+    pub pre_args: Vec<std::ffi::OsString>,
 }
 
 pub struct Job {
@@ -114,7 +117,27 @@ pub fn find_tools(tools_dir: &Path) -> Result<Tools, String> {
     if !missing.is_empty() {
         return Err(format!("The game build cannot run, missing: {}. Extract the release zip again so tools/ is complete.", missing.join("; ")));
     }
-    Ok(Tools { python, script })
+    Ok(Tools { python, script, pre_args: Vec::new() })
+}
+
+/// Linux: the release's build files in `tools_dir` (the game folder's tools/), Python and Zig from the AppImage (`lt`).
+#[cfg(unix)]
+pub fn find_tools_linux(tools_dir: &Path, lt: &Path) -> Result<Tools, String> {
+    let python = crate::linux::python(lt);
+    let script = crate::linux::script(lt, "pkp_linux.py");
+    let zig = crate::linux::zig(lt);
+    let release_script = tools_dir.join("build").join("pkp_build.py");
+    let mut missing = Vec::new();
+    for p in [&python, &script, &zig, &release_script, &tools_dir.join("build/sdk/pkp_rt.lib"), &tools_dir.join("build/recomp/nxrecomp/__main__.py")] {
+        if !p.is_file() {
+            missing.push(p.display().to_string());
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!("The game build cannot run, missing: {}. Install the game files again (Game files page).", missing.join("; ")));
+    }
+    let pre_args = vec!["_build".into(), "--script".into(), release_script.into_os_string(), "--zig".into(), zig.into_os_string()];
+    Ok(Tools { python, script, pre_args })
 }
 
 fn quiet(cmd: &mut Command) {
@@ -133,7 +156,7 @@ pub fn run(job: &Job, tools: &Tools, cancel: &AtomicBool, mut report: impl FnMut
     let cancel_file = build.join("cancel");
     let _ = fs::remove_file(&cancel_file);
     let mut cmd = Command::new(&tools.python);
-    cmd.arg("-I").arg(&tools.script).arg("--exefs").arg(&job.exefs).arg("--game").arg(&job.game_dir);
+    cmd.arg("-I").arg(&tools.script).args(&tools.pre_args).arg("--exefs").arg(&job.exefs).arg("--game").arg(&job.game_dir);
     cmd.args(["--jobs", &job.jobs.max(1).to_string()]);
     quiet(&mut cmd);
     let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("could not start the game build ({}): {}", tools.python.display(), e))?;

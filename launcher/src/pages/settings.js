@@ -64,7 +64,12 @@ const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 const fwd = (s) => String(s).trim().replace(/\\/g, '/');
 
 export async function render(el, ctx) {
-  const [data, cfg, status] = await Promise.all([api('read_settings'), api('get_config'), api('game_status')]);
+  const [data, cfg, status, ov] = await Promise.all([api('read_settings'), api('get_config'), api('game_status'), api('get_overview')]);
+  if (ov.platform === 'linux') {
+    // Linux: the AppImage is read-only, so the game has its own folder (default ~/Games/PokopiaRecomp)
+    const gd = SECTIONS.flatMap((s) => s.fields).find((f) => f.id === 'game_dir');
+    if (gd) gd.placeholder = ov.default_game_dir;
+  }
   const files = { pkp: data.pkp, controls: data.controls, config: { 'game_dir': cfg.game_dir, 'minimize_on_play': cfg.minimize_on_play ? '1' : '0' } };
   const exists = { pkp: true, controls: data.controls_exists, config: true };
   const keyOf = (f, k) => (f.file === 'config' ? k : `${f.sec}.${k}`);

@@ -37,7 +37,7 @@ impl Default for Status {
 #[derive(Default)]
 pub struct PlayState(pub Mutex<Status>);
 
-fn set_status(app: &AppHandle, s: Status) {
+pub(crate) fn set_status(app: &AppHandle, s: Status) {
     *app.state::<PlayState>().0.lock().unwrap() = s.clone();
     let _ = app.emit("game-status", s);
 }
@@ -137,6 +137,9 @@ pub fn start(app: &AppHandle, game_dir: &Path, minimize: bool) -> Result<(), Str
 }
 
 pub fn open_with_shell(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    return crate::linux::open(path);
     // explorer opens a file in its default app and a folder in a window
-    Command::new("explorer.exe").arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
+    #[cfg(not(unix))]
+    return Command::new("explorer.exe").arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e));
 }

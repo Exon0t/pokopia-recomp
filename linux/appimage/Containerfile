@@ -1,0 +1,27 @@
+# Build environment for the Linux launcher AppImage (Tauri 2).
+# Ubuntu 22.04: old enough glibc (2.35) that the AppImage also runs on SteamOS and other current distros,
+# new enough to have webkit2gtk-4.1, which Tauri 2 needs.
+#
+#   podman build -t pokopia-appimage-build -f linux/appimage/Containerfile linux/appimage
+FROM docker.io/library/ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config curl ca-certificates file git xz-utils patchelf squashfs-tools desktop-file-utils \
+        libwebkit2gtk-4.1-dev libgtk-3-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 (Vite 8 needs >= 22.12), checked against nodejs.org's SHASUMS256.txt.
+RUN set -eux; base=https://nodejs.org/dist/latest-v22.x; cd /tmp; \
+    curl -fsSLO "$base/SHASUMS256.txt"; \
+    f=$(grep -oE 'node-v22\.[0-9]+\.[0-9]+-linux-x64\.tar\.xz' SHASUMS256.txt | head -1); \
+    curl -fsSLO "$base/$f"; grep " $f\$" SHASUMS256.txt | sha256sum -c -; \
+    tar -xJf "$f" -C /usr/local --strip-components=1; rm -f "$f" SHASUMS256.txt; node --version
+
+# Rust (stable, minimal profile).
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup.sh && sh /tmp/rustup.sh -y --profile minimal --default-toolchain stable \
+    && rm /tmp/rustup.sh && rustc --version && cargo --version
+
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false TAURI_TELEMETRY=0
+WORKDIR /src

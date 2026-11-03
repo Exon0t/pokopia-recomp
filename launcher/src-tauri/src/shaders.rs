@@ -138,6 +138,20 @@ pub fn find_tools(tools_dir: &Path) -> Result<Tools, String> {
     Ok(Tools { python: python.unwrap(), extract, harness })
 }
 
+/// Linux: the release's extractor from `tools_dir` (the game folder's tools/), Python and the translator from the AppImage
+/// (`lt`). The translator there is a native build from source with the current fixes, server GC set in its runtimeconfig.
+#[cfg(unix)]
+pub fn find_tools_linux(tools_dir: &Path, lt: &Path) -> Result<Tools, String> {
+    let python = crate::linux::python(lt);
+    let extract = tools_dir.join("shaders").join("extract_corpus.py");
+    let harness = crate::linux::harness(lt);
+    let missing: Vec<String> = [&python, &extract, &harness].iter().filter(|p| !p.is_file()).map(|p| p.display().to_string()).collect();
+    if !missing.is_empty() {
+        return Err(format!("Shader setup cannot run, missing: {}. Install the game files again (Game files page).", missing.join("; ")));
+    }
+    Ok(Tools { python, extract, harness })
+}
+
 /// Runs a tool, handing each stdout line to `line`; kills it when `cancel` is set. Ok(true) = exit 0, Ok(false) = cancelled.
 fn run_tool(mut cmd: Command, cancel: &AtomicBool, mut line: impl FnMut(&str)) -> Result<bool, String> {
     quiet(&mut cmd);
