@@ -547,14 +547,13 @@ int hook_cam_stick(::Ctx* c, uint64_t, void*) {
 }
 
 // The 16:9 internal size: the base rule (play_display.h internal_size), kept at 16:9 (the game's cameras and UI are authored for it) and,
-// unless a smaller size was asked for explicitly, at least the console's 1920x1080. On a handheld (nxrt/host_device.h) auto is the
-// window's size: a Steam Deck held ~40-50 fps in the world at 1920x1080 and shows 1280x800 anyway (Game Mode: a 1280x720 window).
+// unless a smaller size was asked for explicitly, at least the console's 1920x1080.
 void pick_size(const play::DisplaySettings& d, int window_w, int window_h, int* out_w, int* out_h) {
     int w = kTableW, h = kTableH;
     play::internal_size(d, window_w, window_h, &w, &h);
     const bool fixed = d.render_width > 0 && d.render_height > 0;
     h = std::min(h, static_cast<int>(static_cast<int64_t>(w) * 9 / 16));
-    if (!fixed && ((d.render_scale <= 0 && !host_is_handheld()) || d.render_scale >= 100)) h = std::max(h, kTableH);
+    if (!fixed && (d.render_scale <= 0 || d.render_scale >= 100)) h = std::max(h, kTableH);
     h = std::clamp(h / 18 * 18, 360, 4320);                          // 16:9 in whole pixels
     *out_w = h * 16 / 9;
     *out_h = h;
@@ -589,7 +588,12 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
     const double aspect = fixed_size ? play::display_aspect(d, d.render_width, d.render_height) : play::display_aspect(d, window_w, window_h);
     Wide& wd = wide();
     wd.aspect = close_to(aspect, kAspect169) ? kAspect169 : aspect;
-    const bool override_size = config_get_bool("pkp", "render_override", true);
+    bool override_size = config_get_bool("pkp", "render_override", true);
+    // A handheld (nxrt/host_device.h), render_scale auto: the window's size (a Steam Deck: 1280x720 in Game Mode; its GPU held ~40-50 fps
+    // in the world at 1920x1080) through the back end's scale over the game's own 1920x1080 layout. Game targets below 1920x1080 (the override path
+    // with a scale under 100) leave some pass at the console size: the player's see-through-walls silhouette landed on the wall at 2/3 of
+    // its place and size, and scaled copies of the scene showed over the picture.
+    if (override_size && host_is_handheld() && d.render_scale <= 0 && !fixed_size) override_size = false;
     if (wide_on()) {   // a non-16:9 shape always takes the wide path (render_override only picks the size for 16:9)
         int gw = kTableW, gh = kTableH;
         if (wd.aspect > kAspect169) gw = static_cast<int>(std::lround(kTableH * wd.aspect)) & ~1;
@@ -643,8 +647,9 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
         else scale = static_cast<float>(std::clamp(d.render_scale, 25, 400)) / 100.0f;
         gfx::tuning().render_scale.store(scale);
         NXLOG_I(kTag, "aspect 16:9 (%s, window %dx%d): letterboxed on other window shapes", d.aspect > 0 ? "[display] aspect" : "auto", window_w, window_h);
-        NXLOG_I(kTag, "render resolution: 1920x1080 targets at scale %.3f (window %dx%d, [display] render_scale %s), dynamic resolution %s", scale,
-                window_w, window_h, d.render_scale <= 0 ? "auto" : std::to_string(d.render_scale).c_str(), d.dynamic_resolution ? "on" : "off");
+        NXLOG_I(kTag, "render resolution: 1920x1080 targets at scale %.3f (window %dx%d, [display] render_scale %s%s), dynamic resolution %s", scale,
+                window_w, window_h, d.render_scale <= 0 ? "auto" : std::to_string(d.render_scale).c_str(),
+                d.render_scale <= 0 && host_is_handheld() ? ", handheld: the window's size" : "", d.dynamic_resolution ? "on" : "off");
         s.render_installed = true;
         return;
     }
@@ -661,9 +666,8 @@ void play_install_render(uint64_t base, const play::DisplaySettings& d, int wind
     s.hooks.push_back(hook_add_mid(base + kReplayViewports, &hook_replay_viewports));
     s.hooks.push_back(hook_add_mid(base + kLowCopy, &hook_low_copy));
     s.render_installed = true;
-    NXLOG_I(kTag, "render resolution %dx%d (window %dx%d, scale %d%%%s%s), dynamic resolution %s", w, h, window_w, window_h, d.render_scale,
-            d.render_width > 0 && d.render_height > 0 ? ", fixed size" : "", d.render_scale <= 0 && host_is_handheld() ? ", handheld: the window's size" : "",
-            d.dynamic_resolution ? "on" : "off");
+    NXLOG_I(kTag, "render resolution %dx%d (window %dx%d, scale %d%%%s), dynamic resolution %s", w, h, window_w, window_h, d.render_scale,
+            d.render_width > 0 && d.render_height > 0 ? ", fixed size" : "", d.dynamic_resolution ? "on" : "off");
 }
 
 void play_install(uint64_t base, play::GameHost* host, const play::Settings& set) {
