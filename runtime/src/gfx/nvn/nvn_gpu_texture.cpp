@@ -215,6 +215,11 @@ VkFormat promoted_view_format(const TexGpu& g, VkFormat f) {
     // NVN format with its own: before, every shader sampling such a depth buffer got the dummy view.
     if (g.fmt && f == g.fmt->vk && g.format == g.fmt->vk_fallback && f != g.format) return g.format;
     if (g.promoted && (f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_R8G8B8A8_UNORM)) return g.format;
+    // Views in another NVN format of an image made in its fallback (AMD has no 24-bit depth formats) take the image's own format too:
+    // depth reads as the same 0..1 values. Before, those views got the dummy, and on the Steam Deck the fog and soft particles that read
+    // the depth buffer covered the ground in white.
+    if (f == VK_FORMAT_D24_UNORM_S8_UINT && g.format == VK_FORMAT_D32_SFLOAT_S8_UINT) return g.format;   // a view in another NVN format
+    if (f == VK_FORMAT_X8_D24_UNORM_PACK32 && g.format == VK_FORMAT_D32_SFLOAT) return g.format;
     // An ASTC view (a texture view naming its ASTC format, sRGB or not) of an image stored transcoded (BC7, or the disk cache's RGBA8/BC5)
     // reads the image's own format, as its sRGB or UNORM partner like the view asks. Mario Kart World's character and course materials
     // name their format in the view; before, they sampled the black dummy.
@@ -555,8 +560,14 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
 
     std::string why = std::string("no Vulkan format for NVN format ") + g->fmt->name;
     VkFormat chosen = VK_FORMAT_UNDEFINED;
+    // [nvn] test_no_d24 = 1 (testing): behave like a GPU without 24-bit depth formats (AMD): DEPTH24 and DEPTH24_STENCIL8 get their fallback.
+    static const bool no_d24 = config_get_bool("nvn", "test_no_d24", false);
     for (VkFormat c : {want, alt}) {
         if (c == VK_FORMAT_UNDEFINED) continue;
+        if (no_d24 && (c == VK_FORMAT_D24_UNORM_S8_UINT || c == VK_FORMAT_X8_D24_UNORM_PACK32)) {
+            if (first_time("test_no_d24")) NXLOG_I(kTag, "texture %u: %s made in its fallback format ([nvn] test_no_d24)", t->id, g->fmt->name);
+            continue;
+        }
         std::string r;
         if (device().image_supported(make_desc(s, c, VK_IMAGE_USAGE_SAMPLED_BIT, base_flags(s, c)), &r)) {
             chosen = c;
