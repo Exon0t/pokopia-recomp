@@ -136,6 +136,9 @@ struct DeviceLimitsExt {
     uint64_t min_imported_host_alignment = 0;   // VK_EXT_external_memory_host (0: not available)
     uint64_t max_buffer_size = 0;
     uint32_t subgroup_size = 0, subgroup_ops = 0;
+    // VK_EXT_subgroup_size_control (Vulkan 1.3): the range a pipeline stage may ask for, and the stages that may ask
+    uint32_t min_subgroup_size = 0, max_subgroup_size = 0, required_subgroup_stages = 0;
+    bool subgroup_size_control = false;
     uint32_t max_memory_allocation_count = 0;
 };
 

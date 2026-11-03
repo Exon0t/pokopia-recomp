@@ -218,6 +218,7 @@ VkPipeline build_pre(VkShaderModule vs, VkShaderModule gs, const ProgLayout& pl,
     auto add = [&](VkShaderStageFlagBits bit, VkShaderModule m) {
         if (!m) return;
         st[n] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        st[n].pNext = subgroup32_info(bit);
         st[n].stage = bit;
         st[n].module = m;
         st[n].pName = "main";
@@ -251,6 +252,7 @@ VkPipeline build_pre(VkShaderModule vs, VkShaderModule gs, const ProgLayout& pl,
 VkPipeline build_fs(VkShaderModule fs, const ProgLayout& pl) {
     VkPipelineShaderStageCreateInfo st = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     st.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    st.pNext = subgroup32_info(VK_SHADER_STAGE_FRAGMENT_BIT);
     st.module = fs;
     st.pName = "main";
     VkPipelineDepthStencilStateCreateInfo ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};

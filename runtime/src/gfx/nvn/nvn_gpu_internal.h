@@ -156,6 +156,11 @@ void mirror_destroy(PoolGpu* p);
 // ---- shadow copies (nvn_gpu_pool.cpp): pools the driver cannot import ([nvn] pool_import) -------------------------------------
 // Render thread, after recording and before vkQueueSubmit2: copies in the pages the submission uses that the CPU changed, and records
 // the barrier that makes the submission's results readable by the host.
+// The game's shaders come from NVIDIA's 32-wide warps: shuffles, ballots and votes assume 32 invocations per subgroup. For a stage of a
+// game pipeline: a VkPipelineShaderStageRequiredSubgroupSizeCreateInfo asking for 32 (static, shareable) when the GPU's subgroups are not
+// 32 wide and it can be asked for that stage (AMD runs 64 wide by default); null otherwise (NVIDIA, or a stage that cannot ask).
+const void* subgroup32_info(VkShaderStageFlagBits stage);
+
 void shadow_before_submit(VkCommandBuffer cb, uint64_t serial);
 // Any thread, from read_completed before a serial is published as done: writes back the results of the submissions done by then.
 void shadow_retire(uint64_t done);

@@ -559,6 +559,7 @@ VkPipeline build_graphics_pipeline(const GraphicsKey& key, const ProgLayout& lay
     for (int i = 0; i < 5; ++i) {
         if (!sm.m[i]) continue;
         stages[ns] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stages[ns].pNext = subgroup32_info(bits[i]);
         stages[ns].stage = bits[i];
         stages[ns].module = sm.m[i];
         stages[ns].pName = "main";
@@ -723,6 +724,7 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgLayout& layout) {
         VkComputePipelineCreateInfo ci = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.pNext = subgroup32_info(VK_SHADER_STAGE_COMPUTE_BIT);
         ci.stage.module = m;
         ci.stage.pName = "main";
         ci.layout = layout.layout;
@@ -901,5 +903,25 @@ struct PipelineGauges {
 };
 PipelineGauges g_pipeline_gauges;
 }  // namespace
+
+const void* subgroup32_info(VkShaderStageFlagBits stage) {
+    static const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo k32 = {
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, nullptr, 32};
+    // [nvn] subgroup32 = 0: never ask (the driver's own width)
+    static const bool on = config_get_bool("nvn", "subgroup32", true);
+    const gfx::DeviceLimitsExt& l = device().limits_ext();
+    const bool needed = on && l.subgroup_size != 32;
+    const bool can = l.subgroup_size_control && l.min_subgroup_size <= 32 && 32 <= l.max_subgroup_size;
+    static std::once_flag logged;
+    std::call_once(logged, [&] {
+        if (!needed) return;
+        const uint32_t game = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_GEOMETRY_BIT |
+                              VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        const uint32_t pinned = can ? (l.required_subgroup_stages & game) : 0;
+        NXLOG_W("nvn", "subgroups are %u wide here, the game's shaders assume 32: asking for 32 in stages 0x%x%s", l.subgroup_size, pinned,
+                (game & ~pinned) ? "; the other stages run at the driver's width (Mesa RADV: RADV_PERFTEST=cswave32,pswave32,gewave32 makes them 32 wide)" : "");
+    });
+    return needed && can && (l.required_subgroup_stages & stage) ? &k32 : nullptr;
+}
 
 }  // namespace nxrt::nvn::be::gpu
