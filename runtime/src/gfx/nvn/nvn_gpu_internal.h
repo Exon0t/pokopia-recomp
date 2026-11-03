@@ -153,6 +153,15 @@ bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use);
 void mirror_begin_submit(Frame& f, bool on);
 void mirror_destroy(PoolGpu* p);
 
+// ---- shadow copies (nvn_gpu_pool.cpp): pools the driver cannot import ([nvn] pool_import) -------------------------------------
+// Render thread, after recording and before vkQueueSubmit2: copies in the pages the submission uses that the CPU changed, and records
+// the barrier that makes the submission's results readable by the host.
+void shadow_before_submit(VkCommandBuffer cb, uint64_t serial);
+// Any thread, from read_completed before a serial is published as done: writes back the results of the submissions done by then.
+void shadow_retire(uint64_t done);
+uint64_t shadow_pending_min();     // serial of the oldest result not written back (0: none)
+void shadow_waiter_start();        // nvn_gpu.cpp: a thread that retires results as soon as the GPU is done (games that poll memory)
+
 // ---- compute results held in the pool copy (nvn_gpu_pool.cpp, "compute out") ----------------------------------------------------
 // A dispatch that binds the pool copy directly (nvn_replay.cpp, compute shadows) writes its result there: the range is "out" until the
 // copy-back to the pool. [nvn] compute_out_lazy (default on): at the end of a submission a result is not copied back but held in the

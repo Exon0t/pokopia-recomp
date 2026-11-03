@@ -5,6 +5,7 @@
 // the same pages. Measured on the RTX 3080 and the UHD 770 with MapViewOfFile views: imports work with 4096-byte alignment,
 // and GPU writes are visible through every view of the section.
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -25,10 +26,11 @@
 #include "vk_gauges.h"
 #include "nvn_gpu_internal.h"
 #include "nvn_mirror_cap.h"
+#include <vk_mem_alloc.h>
 
 namespace nxrt::nvn::be {
 
-namespace gpu { struct Mirror; }
+namespace gpu { struct Mirror; struct ShadowChunk; }
 
 // One Vulkan import of a byte range of a pool: its own private view, VkDeviceMemory and VkBuffer.
 struct PoolChunk {
@@ -39,6 +41,7 @@ struct PoolChunk {
     VkDeviceSize size = 0;
     bool tried = false;               // import attempted
     bool failed = false;
+    gpu::ShadowChunk* sh = nullptr;   // shadow mode: no import, the chunk's own host-visible copy of these pool bytes (buffer above)
 };
 
 // A pool is imported whole (one chunk; the background importer does it) or, when it is larger than one chunk ([nvn] pool_import_chunk_mb), in
@@ -58,6 +61,7 @@ struct PoolGpu {
     std::deque<PoolChunk> spans;      // imports of ranges longer than the overlap that cross a stride boundary (deque: stable addresses)
     gpu::Mirror* mirror = nullptr;  // device-local copy of the pages draws read (S38, [nvn] pool_mirror); render thread
     bool mirror_tried = false;
+    bool shadowed = false;            // some chunk is a shadow copy (no mirror then)
 };
 
 MemoryPool::~MemoryPool() {
@@ -67,6 +71,37 @@ MemoryPool::~MemoryPool() {
 }
 
 namespace gpu {
+
+// ---- shadow copies (no import) --------------------------------------------------------------------------------------------
+// Where the driver cannot import the game's memory (AMD on Linux: the heap is a Windows section, which Wine backs with a shared memory
+// file, and amdgpu takes only anonymous memory for VK_EXT_external_memory_host; every import fails), a chunk gets its own host-visible
+// buffer instead, and the two directions the import made free are done by hand:
+//   CPU -> GPU: resolve_in_pool marks the pages each submission uses; before vkQueueSubmit2 (shadow_before_submit) every used page the CPU
+//               changed since its last copy is copied in. The write tracker (nxrt/write_watch.h) tells which: a copied page is armed, and
+//               the CPU's first write to it faults and marks it. A page written again and again (per-frame data) is "hot": no longer
+//               armed (no fault per frame), copied every time a submission uses it.
+//   GPU -> CPU: note_gpu_write records each range a command writes; when the timeline says the submission is done, shadow_retire copies
+//               it back (through a private view of the section, so no armed page faults) before read_completed lets anybody see that
+//               serial as done. Pages with a write not back yet are not copied in over (the copy is newer).
+// Chunks overlap (pool_import_chunk_mb): a GPU write through one chunk makes the same bytes in the others stale until written back.
+// [nvn] pool_import = auto (default: import, a shadow where an import fails) | off (shadows only: the AMD path on any GPU, for testing).
+struct ShadowChunk {
+    PoolGpu* pg = nullptr;
+    PoolChunk* chunk = nullptr;           // stable: PoolGpu::chunks is sized once, spans is a deque
+    gfx::Buffer buf;                      // the copy (Readback memory: cached, the CPU reads results back from it)
+    uint8_t* host = nullptr;              // buf.mapped
+    uint8_t* guest = nullptr;             // the pool bytes it copies (the game's address)
+    uint8_t* wb = nullptr;                // where results are written back: a private view of the same pages, or the game's address
+    uint64_t size = 0, npages = 0;
+    mem::ww::Region* ww = nullptr;        // the CPU's writes (null outside the heap's primary view: every use copies again)
+    std::vector<uint64_t> need;           // bitmap: pages the submission being recorded uses (render thread)
+    std::vector<uint64_t> checked;        // [nvn] pool_shadow_check: the pages to compare after the copies in
+    std::vector<uint8_t> current;         // the copy holds the page's bytes as of its last copy in (under g_sh_mu)
+    std::vector<uint8_t> writes;          // CPU writes seen after a copy in (saturating; render thread)
+    std::vector<uint64_t> pending;        // serial of the latest GPU write to the page not written back yet, 0: none (under g_sh_mu)
+    bool touched = false;                 // listed in g_sh_touched (render thread)
+};
+
 namespace {
 
 constexpr const char* kTag = "nvn.pool";
@@ -95,8 +130,186 @@ uint64_t import_stride() {
 }
 uint64_t import_overlap() { return import_stride() / 4; }
 
+PoolChunk* pool_chunk(PoolGpu* g, uint64_t k);
+PoolChunk* pool_span(PoolGpu* g, uint64_t off, uint64_t size);
+
+constexpr uint64_t kShPage = 4096;
+constexpr uint8_t kShadowHot = 3;                 // CPU writes after copies in: from then on the page is copied on every use, not armed
+std::mutex g_sh_mu;                               // current/pending of every shadow, g_sh_pending, g_sh_all (read_completed: any thread)
+// A GPU write not written back yet. pre: the copy's bytes of the range as the GPU found them (taken at submit): only bytes that differ from
+// it are written back, so the CPU's writes to the rest of the range since the copy in survive. (The replay writes back whole bound ranges
+// of compute results; with the import that rewrote untouched bytes within microseconds, here the write-back comes a frame or two later.)
+struct ShadowPending { ShadowChunk* sc; uint64_t off, size, serial; std::vector<uint8_t> pre; };
+std::deque<ShadowPending> g_sh_pending;           // GPU writes not written back yet, in serial order
+std::atomic<uint64_t> g_sh_pending_min{0};        // serial of the oldest (0: none)
+std::vector<ShadowChunk*> g_sh_all;               // every live shadow
+std::vector<ShadowChunk*> g_sh_touched;           // render thread: shadows the submission being recorded uses
+std::atomic<bool> g_sh_any{false};
+std::atomic<uint64_t> g_sh_up_pages{0}, g_sh_wb_bytes{0}, g_sh_wb_ranges{0}, g_sh_blocked{0}, g_sh_siblings{0}, g_sh_hot{0}, g_sh_subs{0};
+std::atomic<uint64_t> g_sh_wb_changed{0}, g_sh_wb_kept{0};     // bytes written back (changed by the GPU); bytes the CPU had changed meanwhile, kept
+
+// Writes back the bytes of [src, src + n) that differ from pre into dst, 8 bytes at a time where they can.
+void merge_back(uint8_t* dst, const uint8_t* src, const uint8_t* pre, uint64_t n) {
+    uint64_t i = 0, changed = 0, kept = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t s, p;
+        std::memcpy(&s, src + i, 8);
+        std::memcpy(&p, pre + i, 8);
+        if (s == p) continue;
+        for (int b = 0; b < 8; ++b) {
+            if (src[i + b] == pre[i + b]) continue;
+            dst[i + b] = src[i + b];
+            ++changed;
+        }
+    }
+    for (; i < n; ++i)
+        if (src[i] != pre[i]) { dst[i] = src[i]; ++changed; }
+    (void)kept;
+    g_sh_wb_changed.fetch_add(changed, std::memory_order_relaxed);
+}
+std::vector<uint64_t> g_sh_tmp, g_sh_copy;
+
+// [nvn] pool_import = off, or a device without VK_EXT_external_memory_host: no import is tried.
+// [nvn] pool_shadow_check = 1 (debugging): after the copies in of a submission, every page it uses that is not waiting for a GPU result is
+// compared with the game's memory; a difference is a CPU write the tracking missed (logged with its address, the first 200).
+bool shadow_check() {
+    static const bool on = config_get_bool("nvn", "pool_shadow_check", false);
+    return on;
+}
+std::atomic<uint64_t> g_sh_check_pages{0}, g_sh_check_bad{0};
+
+bool shadow_forced() {
+    static const bool f = [] {
+        const std::string v = config_get_str("nvn", "pool_import", "auto");
+        return v == "off" || v == "0" || v == "false" || v == "shadow" || !device().features().external_memory_host;
+    }();
+    return f;
+}
+
+// Makes c a shadow of pool bytes [off, off + size) of g. why: logged once (the first shadow).
+bool shadow_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const char* what, size_t index, size_t count, const char* why) {
+    c.tried = true;
+    c.off = off;
+    c.size = size;
+    gfx::Device& dev = device();
+    auto* sc = new ShadowChunk();
+    const VkBufferUsageFlags usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
+        (dev.features().transform_feedback ? VK_BUFFER_USAGE_TRANSFORM_FEEDBACK_BUFFER_BIT_EXT : 0u);
+    if (dev.create_buffer(size, usage, gfx::MemoryUse::Readback, &sc->buf, "nvn pool shadow") != VK_SUCCESS || !sc->buf.mapped) {
+        NXLOG_E(kTag, "pool %p %s %zu of %zu: no shadow copy either (%llu MiB of host-visible memory)", static_cast<void*>(g->base), what, index,
+                count, static_cast<unsigned long long>(size >> 20));
+        if (sc->buf) dev.destroy_buffer(sc->buf);
+        delete sc;
+        c.failed = true;
+        return false;
+    }
+    sc->pg = g;
+    sc->chunk = &c;
+    sc->host = static_cast<uint8_t*>(sc->buf.mapped);
+    sc->guest = g->base + off;
+    sc->size = size;
+    sc->npages = (size + kShPage - 1) / kShPage;
+    const uint64_t delta = (reinterpret_cast<uint64_t>(sc->guest) - mem::kHeapBase) & (mem::kAllocGranularity - 1);
+    if (!c.view && g->viewed) {
+        const uint64_t voff = reinterpret_cast<uint64_t>(sc->guest) - mem::kHeapBase - delta;
+        const uint64_t vsize = (delta + size + mem::kAllocGranularity - 1) & ~(mem::kAllocGranularity - 1);
+        c.view = mem::heap_private_view(voff, std::min<uint64_t>(vsize, mem::heap_reserved() - voff));
+    }
+    sc->wb = c.view ? static_cast<uint8_t*>(c.view) + delta : sc->guest;
+    sc->ww = g->viewed ? mem::ww::region_create(reinterpret_cast<uint64_t>(sc->guest), size) : nullptr;
+    sc->need.assign(static_cast<size_t>((sc->npages + 63) / 64), 0);
+    sc->current.assign(static_cast<size_t>(sc->npages), 0);
+    sc->writes.assign(static_cast<size_t>(sc->npages), 0);
+    sc->pending.assign(static_cast<size_t>(sc->npages), 0);
+    c.buffer = sc->buf.buffer;
+    c.sh = sc;
+    c.failed = false;
+    g->shadowed = true;
+    {
+        std::lock_guard<std::mutex> lk(g_sh_mu);
+        g_sh_all.push_back(sc);
+    }
+    if (!g_sh_any.exchange(true)) {
+        NXLOG_W(kTag, "GPU memory import unavailable (%s): pool memory is copied to and from the GPU (shadow copies)", why);
+        shadow_waiter_start();
+    }
+    NXLOG_D(kTag, "pool %p %s %zu of %zu: shadow copy, offset 0x%llx, 0x%llx bytes%s", static_cast<void*>(g->base), what, index, count,
+            static_cast<unsigned long long>(off), static_cast<unsigned long long>(size), sc->ww ? "" : " (untracked: copied on every use)");
+    return true;
+}
+
+void shadow_destroy(PoolChunk& c) {
+    ShadowChunk* sc = c.sh;
+    if (!sc) return;
+    {
+        std::lock_guard<std::mutex> lk(g_sh_mu);
+        g_sh_all.erase(std::remove(g_sh_all.begin(), g_sh_all.end(), sc), g_sh_all.end());
+        g_sh_pending.erase(std::remove_if(g_sh_pending.begin(), g_sh_pending.end(), [sc](const ShadowPending& e) { return e.sc == sc; }),
+                           g_sh_pending.end());
+        g_sh_pending_min.store(g_sh_pending.empty() ? 0 : g_sh_pending.front().serial);
+    }
+    g_sh_touched.erase(std::remove(g_sh_touched.begin(), g_sh_touched.end(), sc), g_sh_touched.end());
+    if (sc->ww) mem::ww::region_destroy(sc->ww);
+    buffer_views_forget(sc->buf.buffer);
+    device().destroy_buffer(sc->buf);
+    delete sc;
+    c.sh = nullptr;
+    c.buffer = VK_NULL_HANDLE;
+}
+
+// The submission being recorded uses chunk bytes [coff, coff + size) (render thread).
+void shadow_need(ShadowChunk* sc, uint64_t coff, uint64_t size) {
+    if (coff >= sc->size) return;
+    const uint64_t end = std::min<uint64_t>(coff + std::max<uint64_t>(size, 1), sc->size);
+    const uint64_t first = coff / kShPage, last = (end - 1) / kShPage;
+    for (uint64_t p = first; p <= last;) {
+        if ((p & 63) == 0 && last - p >= 63) { sc->need[p >> 6] = ~0ull; p += 64; continue; }
+        sc->need[p >> 6] |= 1ull << (p & 63);
+        ++p;
+    }
+    if (!sc->touched) {
+        sc->touched = true;
+        g_sh_touched.push_back(sc);
+    }
+}
+
+// A command of the submission being recorded writes pool bytes [addr, addr + size) (render thread, note_gpu_write).
+void shadow_gpu_write(uint64_t addr, uint64_t size) {
+    const PoolHit hit = pool_lookup(addr);
+    if (!hit.pool || !hit.pool->gpu || !hit.pool->gpu->shadowed || !size) return;
+    PoolGpu* pg = hit.pool->gpu;
+    const uint64_t off = addr - reinterpret_cast<uint64_t>(pg->base);
+    if (off >= pg->size) return;
+    const uint64_t end = std::min<uint64_t>(off + size, pg->size);
+    // the chunk the command wrote through: the one resolve_in_pool gave it
+    PoolChunk* dst = pool_chunk(pg, off / pg->stride);
+    if (dst && end > dst->off + dst->size)
+        if (PoolChunk* sp = pool_span(pg, off, end - off)) dst = sp;
+    if (!dst || !dst->sh || end > dst->off + dst->size) return;
+    const uint64_t serial = current_serial();
+    std::lock_guard<std::mutex> lk(g_sh_mu);
+    for (ShadowChunk* s : g_sh_all) {
+        if (s->pg != pg) continue;
+        const uint64_t so = s->chunk->off;
+        if (end <= so || off >= so + s->size) continue;
+        const uint64_t a = std::max<uint64_t>(off, so) - so, b = std::min<uint64_t>(end, so + s->size) - so;
+        for (uint64_t p = a / kShPage; p <= (b - 1) / kShPage; ++p) {
+            s->pending[p] = serial;
+            if (s != dst->sh) s->current[p] = 0;            // the result lands in dst's copy only
+        }
+        if (s != dst->sh) g_sh_siblings.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_sh_pending.push_back({dst->sh, off - dst->off, end - off, serial, {}});
+    if (!g_sh_pending_min.load(std::memory_order_relaxed)) g_sh_pending_min.store(serial);
+}
+
 // Imports pool bytes [off, off + size) of g into c. False (c.failed) when it cannot.
 bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const char* what, size_t index, size_t count) {
+    if (shadow_forced())
+        return shadow_range(g, c, off, size, what, index, count,
+                            device().features().external_memory_host ? "[nvn] pool_import = off" : "VK_EXT_external_memory_host is missing");
     c.tried = true;
     c.off = off;
     c.size = size;
@@ -124,8 +337,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
     { NXFT("pool.hostprops"); r = vkGetMemoryHostPointerPropertiesEXT(dev.device(), VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, import_ptr, &hp); }
     if (r != VK_SUCCESS || !hp.memoryTypeBits) {
         NXLOG_E(kTag, "vkGetMemoryHostPointerPropertiesEXT failed (%d) for %p (%s %zu of %zu)", static_cast<int>(r), reinterpret_cast<void*>(start), what, index, count);
-        c.failed = true;
-        return false;
+        return shadow_range(g, c, off, size, what, index, count, "the driver gives no memory type for the game's memory");
     }
     uint32_t ty = 0;
     while (!(hp.memoryTypeBits & (1u << ty))) ++ty;
@@ -142,8 +354,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
         NXLOG_E(kTag, "importing pool %p %s %zu of %zu (offset 0x%llx, 0x%llx bytes) failed (%d)", static_cast<void*>(g->base), what, index, count,
                 static_cast<unsigned long long>(off), static_cast<unsigned long long>(size), static_cast<int>(r));
         c.mem = VK_NULL_HANDLE;
-        c.failed = true;
-        return false;
+        return shadow_range(g, c, off, size, what, index, count, "the driver refuses to import the game's memory");
     }
     vk_gauge_memory_allocs().add(1);
     vk_gauge_memory_bytes().add(static_cast<int64_t>(size));
@@ -182,6 +393,7 @@ bool import_range(PoolGpu* g, PoolChunk& c, uint64_t off, uint64_t size, const c
 }
 
 void destroy_chunk(PoolChunk& c) {
+    if (c.sh) shadow_destroy(c);
     gfx::Device& dev = device();
     if (c.buffer) buffer_views_forget(c.buffer);
     if (c.buffer) { vkDestroyBuffer(dev.device(), c.buffer, nullptr); vk_gauge_buffers().sub(1); }
@@ -200,7 +412,7 @@ PoolGpu* import_pool(MemoryPool* p) {
     auto* g = new PoolGpu();
     g->flags = p->flags;
     gfx::Device& dev = device();
-    if (!dev.features().external_memory_host || !p->base || !p->size) {
+    if ((!dev.features().external_memory_host && !shadow_forced()) || !p->base || !p->size) {
         g->failed = true;
         NXLOG_E(kTag, "pool at %p size 0x%llx cannot be imported (%s)", static_cast<void*>(p->base), static_cast<unsigned long long>(p->size),
                 !dev.features().external_memory_host ? "VK_EXT_external_memory_host is missing" : "no storage");
@@ -355,6 +567,171 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
 
 BufRef resolve_buffer(uint64_t gpu_address, uint64_t size) { return resolve_in_pool(gpu_address, size, nullptr, nullptr); }
 
+void shadow_before_submit(VkCommandBuffer cb, uint64_t serial) {
+    if (g_sh_touched.empty()) return;
+    gfx::Device& dev = device();
+    bool writes_now = false;
+    // Pages the submission needs fresh while an earlier submission's GPU write to them is not back yet: copying in now could overwrite that
+    // result in the copy (if the GPU already ran it) before it reaches the game's memory. They wait for that submission (render thread),
+    // its write-back, then are copied in.
+    struct Deferred { ShadowChunk* sc; uint64_t p; };
+    std::vector<Deferred> deferred;
+    uint64_t wait_for = 0;
+    auto copy_in = [](ShadowChunk* sc, uint64_t p, uint64_t& lo, uint64_t& hi) {
+        const uint64_t o = p * kShPage, n = std::min<uint64_t>(kShPage, sc->size - o);
+        std::memcpy(sc->host + o, sc->guest + o, static_cast<size_t>(n));
+        sc->current[p] = 1;
+        lo = std::min(lo, o);
+        hi = std::max(hi, o + n);
+        g_sh_up_pages.fetch_add(1, std::memory_order_relaxed);
+    };
+    for (ShadowChunk* sc : g_sh_touched) {
+        sc->touched = false;
+        if (shadow_check()) sc->checked = sc->need;
+        if (sc->ww) {
+            g_sh_tmp.clear();
+            mem::ww::take_written(sc->ww, g_sh_tmp);
+            for (uint64_t p : g_sh_tmp)
+                if (p < sc->npages && sc->writes[p] < 255 && ++sc->writes[p] == kShadowHot) g_sh_hot.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Pages are armed before they are copied: the game's other threads keep writing guest memory while this runs, and a write between
+        // the copy and the arm would be in neither the copy nor the write record. Armed first, such a write faults and the page is copied
+        // again for the next submission.
+        uint64_t lo = UINT64_MAX, hi = 0, arm_first = 0, arm_n = 0;
+        g_sh_copy.clear();
+        auto arm_flush = [&] {
+            if (arm_n && !mem::ww::arm(sc->ww, arm_first, arm_n))
+                for (uint64_t q = arm_first; q < arm_first + arm_n; ++q) sc->writes[q] = kShadowHot;   // cannot be tracked: copy on every use
+            arm_n = 0;
+        };
+        std::lock_guard<std::mutex> lk(g_sh_mu);
+        for (size_t w = 0; w < sc->need.size(); ++w) {
+            uint64_t bits = sc->need[w];
+            sc->need[w] = 0;
+            while (bits) {
+                const uint64_t p = w * 64 + static_cast<uint64_t>(std::countr_zero(bits));
+                bits &= bits - 1;
+                if (p >= sc->npages) break;
+                if (sc->pending[p] == serial) writes_now = true;
+                const bool hot = sc->writes[p] >= kShadowHot;
+                if (sc->current[p] && sc->ww && !hot && mem::ww::page_valid(sc->ww, p)) continue;
+                if (sc->pending[p] && sc->pending[p] < serial) {
+                    deferred.push_back({sc, p});
+                    wait_for = std::max(wait_for, sc->pending[p]);
+                    g_sh_blocked.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                g_sh_copy.push_back(p);
+                if (!sc->ww || hot) continue;
+                if (arm_n && arm_first + arm_n == p) { ++arm_n; continue; }
+                arm_flush();
+                arm_first = p;
+                arm_n = 1;
+            }
+        }
+        if (sc->ww) arm_flush();
+        for (uint64_t p : g_sh_copy) copy_in(sc, p, lo, hi);
+        if (lo < hi) vmaFlushAllocation(dev.allocator(), sc->buf.allocation, lo, hi - lo);
+    }
+    if (!deferred.empty()) {
+        wait_serial(wait_for, UINT64_MAX);          // its read_completed writes the results back (shadow_retire)
+        std::lock_guard<std::mutex> lk(g_sh_mu);
+        for (const Deferred& d : deferred) {
+            ShadowChunk* sc = d.sc;
+            if (sc->pending[d.p] && sc->pending[d.p] < serial) continue;   // cannot happen after the wait; keep the copy's result then
+            uint64_t lo = UINT64_MAX, hi = 0;
+            if (sc->ww && sc->writes[d.p] < kShadowHot && !mem::ww::arm(sc->ww, d.p, 1)) sc->writes[d.p] = kShadowHot;   // armed first, as above
+            copy_in(sc, d.p, lo, hi);
+            vmaFlushAllocation(dev.allocator(), sc->buf.allocation, lo, hi - lo);
+        }
+    }
+    if (shadow_check()) {
+        std::lock_guard<std::mutex> lk(g_sh_mu);
+        for (ShadowChunk* sc : g_sh_touched) {
+            vmaInvalidateAllocation(dev.allocator(), sc->buf.allocation, 0, VK_WHOLE_SIZE);
+            for (size_t w = 0; w < sc->checked.size(); ++w)
+                for (uint64_t bits = sc->checked[w]; bits; bits &= bits - 1) {
+                    const uint64_t p = w * 64 + static_cast<uint64_t>(std::countr_zero(bits));
+                    if (p >= sc->npages || sc->pending[p] || !sc->ww || !mem::ww::page_valid(sc->ww, p)) continue;
+                    const uint64_t o = p * kShPage, n = std::min<uint64_t>(kShPage, sc->size - o);
+                    g_sh_check_pages.fetch_add(1, std::memory_order_relaxed);
+                    if (!std::memcmp(sc->host + o, sc->guest + o, static_cast<size_t>(n))) continue;
+                    uint64_t first = 0;
+                    while (first < n && sc->host[o + first] == sc->guest[o + first]) ++first;
+                    const uint64_t bad = g_sh_check_bad.fetch_add(1, std::memory_order_relaxed);
+                    if (bad < 200)
+                        NXLOG_W(kTag, "shadow check: serial %llu, %p (pool %p +0x%llx, chunk +0x%llx page %llu): copy differs from the game's memory "
+                                      "from byte %llu (copy %02x, game %02x); current %d, armed-valid %d, CPU writes %u, hot %d",
+                                static_cast<unsigned long long>(serial), static_cast<void*>(sc->guest + o + first), static_cast<void*>(sc->pg->base),
+                                static_cast<unsigned long long>(sc->chunk->off + o + first), static_cast<unsigned long long>(sc->chunk->off),
+                                static_cast<unsigned long long>(p), static_cast<unsigned long long>(first), sc->host[o + first], sc->guest[o + first],
+                                sc->current[p], sc->ww ? static_cast<int>(mem::ww::page_valid(sc->ww, p)) : -1, sc->writes[p],
+                                sc->writes[p] >= kShadowHot);
+                }
+        }
+    }
+    g_sh_touched.clear();
+    {
+        std::lock_guard<std::mutex> lk(g_sh_mu);
+        for (auto it = g_sh_pending.rbegin(); it != g_sh_pending.rend() && it->serial == serial; ++it) {
+            if (!it->pre.empty()) continue;
+            vmaInvalidateAllocation(dev.allocator(), it->sc->buf.allocation, it->off, it->size);
+            it->pre.assign(it->sc->host + it->off, it->sc->host + it->off + it->size);
+            writes_now = true;
+        }
+    }
+    if (writes_now || g_sh_pending_min.load(std::memory_order_relaxed)) {
+        // results of this submission are read by the CPU (shadow_retire) after the timeline says it is done
+        VkMemoryBarrier mb = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
+    if ((g_sh_subs.fetch_add(1, std::memory_order_relaxed) + 1) % 600 == 0) {
+        uint64_t n = 0, bytes = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_sh_mu);
+            for (const ShadowChunk* s : g_sh_all) { ++n; bytes += s->size; }
+        }
+        NXLOG_I(kTag, "shadow copies: %llu chunks (%llu MiB); %llu pages copied in, %llu results written back (%llu MiB), %llu hot pages, %llu copies in held back by "
+                      "a result not back yet (waited for), %llu writes that made other chunks stale, %llu MiB the GPU changed",
+                static_cast<unsigned long long>(n), static_cast<unsigned long long>(bytes >> 20), static_cast<unsigned long long>(g_sh_up_pages.load()), static_cast<unsigned long long>(g_sh_wb_ranges.load()),
+                static_cast<unsigned long long>(g_sh_wb_bytes.load() >> 20), static_cast<unsigned long long>(g_sh_hot.load()),
+                static_cast<unsigned long long>(g_sh_blocked.load()), static_cast<unsigned long long>(g_sh_siblings.load()),
+                static_cast<unsigned long long>(g_sh_wb_changed.load() >> 20));
+    }
+}
+
+void shadow_retire(uint64_t done) {
+    if (!g_sh_any.load(std::memory_order_relaxed)) return;
+    const uint64_t m = g_sh_pending_min.load(std::memory_order_acquire);
+    if (!m || m > done) return;
+    std::lock_guard<std::mutex> lk(g_sh_mu);
+    while (!g_sh_pending.empty() && g_sh_pending.front().serial <= done) {
+        const ShadowPending e = std::move(g_sh_pending.front());
+        g_sh_pending.pop_front();
+        ShadowChunk* sc = e.sc;
+        vmaInvalidateAllocation(device().allocator(), sc->buf.allocation, e.off, e.size);
+        if (e.pre.size() == e.size) merge_back(sc->wb + e.off, sc->host + e.off, e.pre.data(), e.size);
+        else std::memcpy(sc->wb + e.off, sc->host + e.off, static_cast<size_t>(e.size));    // no pre-image (not submitted normally)
+        g_sh_wb_bytes.fetch_add(e.size, std::memory_order_relaxed);
+        g_sh_wb_ranges.fetch_add(1, std::memory_order_relaxed);
+        // the write is back: its pages may be copied in again, in every chunk over them
+        const uint64_t a = sc->chunk->off + e.off, b = a + e.size;
+        for (ShadowChunk* s : g_sh_all) {
+            if (s->pg != sc->pg) continue;
+            const uint64_t so = s->chunk->off;
+            if (b <= so || a >= so + s->size) continue;
+            const uint64_t x = std::max<uint64_t>(a, so) - so, y = std::min<uint64_t>(b, so + s->size) - so;
+            for (uint64_t p = x / kShPage; p <= (y - 1) / kShPage; ++p)
+                if (s->pending[p] && s->pending[p] <= done) s->pending[p] = 0;
+        }
+    }
+    g_sh_pending_min.store(g_sh_pending.empty() ? 0 : g_sh_pending.front().serial, std::memory_order_release);
+}
+
+uint64_t shadow_pending_min() { return g_sh_pending_min.load(std::memory_order_acquire); }
+
 namespace {
 // out.buffer / out.offset name the chunk (or span) import holding the range; *pool_off_out receives the offset from the pool's aligned base
 // (what the mirror's pages count from). out.avail is what is left of that import, at least the chunk overlap for a chunked pool.
@@ -405,6 +782,7 @@ BufRef resolve_in_pool(uint64_t gpu_address, uint64_t size, MemoryPool** pool_ou
         out.avail = 65536;
         return out;
     }
+    if (c->sh) shadow_need(c->sh, off - c->off, size);
     out.buffer = c->buffer;
     out.offset = off - c->off;
     out.avail = c->off + c->size - off;
@@ -603,6 +981,7 @@ bool range_valid(const Mirror& m, uint64_t first, uint64_t count) { return mem::
 Mirror* mirror_for(PoolGpu* pg, MemoryPool* mp) {
     if (pg->mirror || pg->mirror_tried) return pg->mirror;
     pg->mirror_tried = true;
+    if (pg->shadowed) return nullptr;     // the shadows are the GPU's copy already
     if (!mp || mp->is_virtual || mp->is_shader_code || mp->dead.load() || pg->failed) return nullptr;
     // Tracked copies change the protection of the CPU's view of the pages. With [nvn] pool_view = false the GPU import is that same view;
     // that combination is not tried: no copy.
@@ -895,6 +1274,7 @@ bool mirror_fill(VkCommandBuffer cb, uint64_t gpu_address, uint64_t size, uint64
 }
 
 bool note_gpu_write(uint64_t gpu_address, uint64_t size, int use) {
+    if (g_sh_any.load(std::memory_order_relaxed)) shadow_gpu_write(gpu_address, size);
     if (g_mirrors.empty() || !size) return false;
     const PoolHit hit = pool_lookup(gpu_address);
     if (!hit.pool || !hit.pool->gpu || !hit.pool->gpu->mirror) return false;

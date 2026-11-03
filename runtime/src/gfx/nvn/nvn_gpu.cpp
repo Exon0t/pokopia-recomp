@@ -142,8 +142,34 @@ uint64_t read_completed() {
     if (g && g->dev->device_lost()) return g->completed.load();
     uint64_t v = 0;
     if (g && g->timeline) vkGetSemaphoreCounterValue(g->dev->device(), g->timeline, &v);
-    if (g) complete_serial(v);
+    if (g && v > g->completed.load()) {
+        shadow_retire(v);          // shadow copies: the results of those submissions reach the game's memory before anybody sees them done
+        complete_serial(v);
+    }
     return g->completed.load();
+}
+
+// Shadow copies (nvn_gpu_pool.cpp): a game may poll memory the GPU writes instead of waiting on a sync, so results are written back as soon
+// as the GPU is done, not only when somebody asks for the serial.
+std::thread g_shadow_thread;
+std::atomic<bool> g_shadow_stop{false};
+std::once_flag g_shadow_once;
+
+void shadow_wait_loop() {
+    log_set_thread_name("nvn-shadow");
+    while (!g_shadow_stop.load()) {
+        const uint64_t s = shadow_pending_min();
+        if (!s || !g || !g->timeline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        VkSemaphoreWaitInfo wi = {VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &g->timeline;
+        wi.pValues = &s;
+        vkWaitSemaphores(g->dev->device(), &wi, 20ull * 1000 * 1000);
+        read_completed();
+    }
 }
 
 void drain_pending_destroy() {
@@ -463,6 +489,10 @@ gfx::Device& device() { return *g->dev; }
 VkDevice vkdev() { return g->dev->device(); }
 Counters& counters() { return g->ctr; }
 Counters* counters_if() { return g ? &g->ctr : nullptr; }
+void shadow_waiter_start() {
+    std::call_once(g_shadow_once, [] { g_shadow_thread = std::thread(shadow_wait_loop); });
+}
+
 uint64_t completed_serial() { return g ? g->completed.load() : 0; }
 uint64_t poll_completed() { return g ? read_completed() : 0; }
 uint64_t current_serial() { return g ? (g->recording ? g->recording : g->submitted) : 0; }
@@ -665,6 +695,7 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         s.cpu_t0 = ft::now_ns();
     }
     record(f);
+    shadow_before_submit(s.cb, serial);
     if (g->gpool) gpass_stamp(f, "tail", 0);
     if (g->qpool) vkCmdWriteTimestamp(s.cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g->qpool, qi + 1);
     vkEndCommandBuffer(s.cb);
@@ -1130,6 +1161,10 @@ void register_counter_gauges() {
 void tear_down() {
     std::lock_guard<std::mutex> lk(g_install_mu);
     if (!g) return;
+    if (g_shadow_thread.joinable()) {
+        g_shadow_stop.store(true);
+        g_shadow_thread.join();
+    }
     for (const char* n : kCounterGauges) nxrt::gauge_unregister(n);
     Gpu* gp = g;
     run_on_render_thread([&] {
