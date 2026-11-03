@@ -58,6 +58,8 @@ Handheld support covers Steam Deck, Legion Go S and SteamOS. Link Play (two play
 - GPU with Vulkan 1.3
 - 16 GB of RAM
 
+Linux, SteamOS and the Steam Deck: the launcher AppImage, the Linux build and the setup are in [linux/README.md](linux/README.md).
+
 ## Quick start
 
 1. Download the zip from the [latest release](https://github.com/featureJosh/pokopia-recomp/releases/latest) and extract it anywhere.

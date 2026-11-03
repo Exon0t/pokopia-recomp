@@ -12,14 +12,22 @@ body:
   - type: input
     id: commit
     attributes:
-      label: Commit you built
-      placeholder: e.g. a1b2c3d
+      label: Release or commit
+      placeholder: e.g. AppImage 0.1.1-linux.1, or commit a1b2c3d
     validations:
       required: true
   - type: input
     id: system
     attributes:
-      label: GPU, driver and Windows version
+      label: Device, GPU and driver
+      placeholder: e.g. Steam Deck LCD, or RTX 4070 with NVIDIA 580 / RX 7800 XT with Mesa 26
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Distribution or SteamOS version, and Proton or Wine version
+      placeholder: e.g. SteamOS 3.8, Proton Experimental
     validations:
       required: true
   - type: textarea

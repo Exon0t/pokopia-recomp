@@ -20,6 +20,17 @@ romfs/
 *.log.prev
 pkp.ini
 pipeline_keys.bin
+pipeline_cache.bin
+shader_order.txt
+*.spv
+results.tsv
+*.preload.pack*
+save/
+smoke_save/
+pkp_freeze.txt
+*.dll
+*.AppImage
+*.zip
 # tool output
 node_modules/
 target/
