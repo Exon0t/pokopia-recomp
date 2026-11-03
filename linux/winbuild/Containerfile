@@ -1,0 +1,24 @@
+# Cross-compiling the Windows runtime (pkp_rt.dll) on Linux: clang-cl + lld-link against the MSVC C runtime and Windows SDK,
+# which xwin downloads from Microsoft at build time (linux/winbuild/build.sh; that step accepts Microsoft's licence for them).
+#
+#   podman build -t pokopia-winbuild -f linux/winbuild/Containerfile linux/winbuild
+FROM registry.fedoraproject.org/fedora:44
+
+RUN dnf -y install --setopt=install_weak_deps=False \
+        clang lld llvm cmake ninja-build nasm git python3 rsync curl xz tar gzip perl make diffutils which findutils file \
+    && dnf clean all
+
+# xwin 0.10.0: fetches and lays out the MSVC CRT + Windows SDK for clang-cl
+RUN set -eux; cd /tmp; \
+    curl -fsSLO https://github.com/Jake-Shadle/xwin/releases/download/0.10.0/xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz; \
+    echo "d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88  xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz" | sha256sum -c -; \
+    tar -xzf xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz; install -m755 xwin-0.10.0-x86_64-unknown-linux-musl/xwin /usr/local/bin/xwin; \
+    rm -rf /tmp/xwin-*; xwin --version
+
+# ISPC: Fedora's 1.30.0, built on LLVM 21. The official Linux ISPC (1.32.0, LLVM 23) cannot target Windows, so
+# linux/winbuild/ispc-win.sh has ISPC emit LLVM bitcode and compiles it with this clang (LLVM 22) for Windows; LLVM reads
+# bitcode from older versions, not from newer ones, so the ISPC must not be built on a newer LLVM than the clang.
+RUN dnf -y install --setopt=install_weak_deps=False ispc && dnf clean all && ispc --version
+
+RUN clang --version | head -1
+WORKDIR /src
