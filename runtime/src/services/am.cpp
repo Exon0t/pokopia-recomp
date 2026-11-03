@@ -9,6 +9,7 @@
 // layout (AppletAE/Storage/StorageHelper.cs MakeLaunchParams) and the GamePlay recording command id.
 // Adapted from SuperMarioWonderRecomp runtime/src/svc_am.cpp (MIT): the window controller's applet resource user id.
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -809,6 +810,23 @@ void swkbd_start(const std::shared_ptr<AppletState>& ap) {
         NXLOG_W("am", "swkbd: no keyboard config among the %zu storages pushed: defaults used", a.in_data.size());
     }
     r.max_len = max_len;
+    // Switch 2's keyboard (library version 0x140010, a 1328-byte config): Pokopia read the answer as single bytes although the byte at
+    // 0x3BD (UseUtf8 in the Switch layout) was 0; a name answered in UTF-16 came out as its first letter ("Alex" -> "A"). From library
+    // version 0x140000 on, the answer is UTF-8.
+    if (version >= 0x140000) a.utf8 = true;
+    // [applet] swkbd_utf8 = auto (as above) | 1 | 0: the encoding of the answer
+    {
+        const std::string e = nxrt::config_get_str("applet", "swkbd_utf8", "auto");
+        if (e == "1" || e == "on" || e == "true") a.utf8 = true;
+        else if (e == "0" || e == "off" || e == "false") a.utf8 = false;
+    }
+    if (cfg && nxrt::config_get_bool("applet", "swkbd_dump", false)) {   // [applet] swkbd_dump = 1: the config's bytes from 0x380, 32 per line
+        for (size_t o = 0x380; o < cfg->size(); o += 32) {
+            char line[3 * 32 + 1] = {};
+            for (size_t i = 0; i < 32 && o + i < cfg->size(); ++i) std::snprintf(line + 3 * i, 4, "%02x ", (*cfg)[o + i]);
+            NXLOG_I("am", "swkbd config +0x%03zx: %s", o, line);
+        }
+    }
     NXLOG_I("am", "swkbd: version 0x%x, config %zu bytes, work %zu bytes, max length %u, utf8 %d, text check %d, header \"%s\", guide \"%s\", initial \"%s\"",
             version, cfg ? cfg->size() : size_t{0}, work ? work->size() : size_t{0}, max_len, a.utf8 ? 1 : 0, a.text_check ? 1 : 0,
             r.header.c_str(), r.guide.c_str(), r.initial.c_str());
