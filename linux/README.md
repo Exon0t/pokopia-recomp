@@ -28,9 +28,9 @@ The dump is the usual layout: `base/` and `updates/<version>/`, each with `exefs
 
 ## Steam Deck
 
-Setup works on the Deck too, but its 4-core CPU makes it slower; setting up on a desktop (about 20 minutes on an 8-core PC)
-and copying the finished game folder to the Deck is quicker. The shader cache is SPIR-V, which runs on any GPU, so a cache
-built on an NVIDIA desktop is fine on the Deck.
+Setup works on the Deck too, but its 4-core CPU makes it slower (about 1¼ hours on a Deck LCD: 28 min building, ~45 min of
+shaders); setting up on a desktop (about 20 minutes on an 8-core PC) and copying the finished game folder to the Deck is quicker.
+The shader cache is SPIR-V, which runs on any GPU, so a cache built on an NVIDIA desktop is fine on the Deck.
 
 - **Put it on the internal SSD.** A microSD card works, but the first start reads ~2 GB of shaders and game data; from a card
   that is around 30 s before the title screen, from the SSD a few seconds.
@@ -39,12 +39,14 @@ built on an NVIDIA desktop is fine on the Deck.
   (`tools/` and `build/` are only needed for setup).
 - Add it to Steam in Desktop Mode: the AppImage's **Add to Steam**, or by hand (*Add a Non-Steam Game*, `pkp.exe`, Start in =
   the folder, Compatibility: Proton Experimental). Then play from Game Mode.
-- The runtime recognises the Deck (Steam sets `SteamDeck=1`): it renders at 720p and shows the controller's button prompts.
+- The runtime recognises the Deck (Steam sets `SteamDeck=1`): the game's handheld mode, 720p, short waits slept instead of
+  spun, and the controller's button prompts. `[display] render_scale` in `controls.ini` overrides the resolution (`100` =
+  1080p), `[am] operation_mode = docked` the mode, `[host] handheld = off` in `pkp.ini` turns all the Deck defaults off.
 - When the game asks for a name, Steam's on-screen keyboard comes up by itself; its Enter confirms. Closing it and pressing any
   button shows the game's own on-screen keys instead. `[applet] steam_keyboard = off` in `pkp.ini` keeps Steam's keyboard away.
-  `[display] render_scale` in `controls.ini` overrides the resolution (`100` = 1080p), `[host] handheld = off` in `pkp.ini`
-  turns the Deck defaults off.
-- On a Deck LCD the game plays at about 30 fps (720p, the default).
+- The settings menu (F1 on a keyboard): hold **View + Menu**, the two buttons beside the screen. The d-pad moves through it, A
+  selects, B backs out, + closes it.
+- On a Deck LCD the game plays at about 50-55 fps (measured: 54 on average outdoors, 1% lows around 30).
 - The first start after a new shader cache takes longest: the game writes `shader_cache/spirv.preload.pack` in the background
   once it has loaded, and later starts read that one file instead of thousands.
 
@@ -87,8 +89,10 @@ self-contained and portable. Saves go to `save/`, the log to `pkp.log`. In game,
 
 - **Shaders the game builds while it runs.** Setup translates every shader in the game files, but the game also assembles
   some while it runs (about 200 in the first hours). Until those are translated, whatever uses them is not drawn (a black
-  character, for example). Setup turns on `[nvn] dump_missing`, which saves each one to `shader_cache/missing`; translate them
-  with the launcher's **Translate now** or `pkp_linux.py refresh` (seconds). Do it again after reaching new areas.
+  character, for example). Setup ends with one hidden run of the game (`pkp_linux.py warmup`: 60 s headless through Steam's
+  Proton or Wine, with a save folder of its own) that records and translates the opening's. Setup also turns on
+  `[nvn] dump_missing`, which saves later ones to `shader_cache/missing`; translate them with the launcher's **Translate now**
+  (Play does it too) or `pkp_linux.py refresh` (seconds). Do it again after reaching new areas.
 - **`[nvn] pool_mirror = off`** (setup writes it). Upstream's "Faster GPU memory" keeps copies of the game's memory in video
   memory and tracks the game's writes with page protection; under Wine that cost 0.4 ms per write fault and 17-98 fps on an
   RTX 4070 against 162-165 fps without it. Under Wine the heap is now private memory (`[memory] heap_section = auto`), which has
