@@ -23,6 +23,7 @@
 #include <imgui_impl_vulkan.h>
 
 #include "nxrt/config.h"
+#include "nxrt/host_device.h"
 #include "nxrt/input_source.h"
 #include "nxrt/log.h"
 #include "nxrt/nvn.h"
@@ -251,6 +252,12 @@ struct Overlay::Impl {
     // The pad (set_keyboard_pad, on the thread that polls it): what is held, and presses not yet taken by draw().
     std::atomic<uint64_t> pad_held{0}, pad_new{0};
     uint64_t pad_prev = 0, pad_mask = 0;  // set_keyboard_pad only
+    // Steam's on-screen keyboard (host_steam_keyboard_*): wanted for the question on screen (a handheld, SteamOS, Steam's gamepad UI),
+    // and asked for. It is asked for once the text field has a place on screen, and closed with the question.
+    bool kb_steam_want = false, kb_steam_open = false;
+    int kb_frames = 0;                    // frames drawn for the question on screen (its layout settles after the first)
+    bool kb_keys = true;                  // the on-screen keys are shown (with Steam's keyboard: only after a pad press reached the game)
+    void kb_steam_close();                // kb_mu held
 
     bool kb_poll();                       // follows swkbdui::pending(): opens a new question, drops one answered elsewhere; true while open
     bool kb_finish(bool ok);              // kb_mu held: answers the question; false when there is none or OK is not allowed yet (min_len)
@@ -515,7 +522,11 @@ bool Overlay::Impl::kb_poll() {
     if (now_id && now_id <= kb_answered) now_id = 0;    // answered here meanwhile
     if (now_id == kb_id) return kb_id != 0;
     if (kb_id && !now_id) NXLOG_I(kTag, "on-screen keyboard: question %llu closed elsewhere", static_cast<unsigned long long>(kb_id));
+    kb_steam_close();
     kb_id = now_id;
+    kb_steam_want = now_id != 0 && host_steam_keyboard_wanted();
+    kb_frames = 0;
+    kb_keys = !kb_steam_want;
     if (now_id) {
         kb_req = std::move(r);
         for (std::string* t : {&kb_req.title, &kb_req.header, &kb_req.sub, &kb_req.guide, &kb_req.ok_text}) *t = fold_punct(*t);
@@ -542,7 +553,15 @@ bool Overlay::Impl::kb_finish(bool ok) {
     kb_open = false;
     NXLOG_I(kTag, "on-screen keyboard: question %llu %s", static_cast<unsigned long long>(id), ok ? "answered" : "cancelled");
     services::swkbdui::answer(id, ok, ok ? u32_to_utf8(kb_text) : std::string());
+    kb_steam_close();
+    kb_steam_want = false;
     return true;
+}
+
+void Overlay::Impl::kb_steam_close() {
+    if (!kb_steam_open) return;
+    kb_steam_open = false;
+    host_steam_keyboard_close();
 }
 
 void Overlay::Impl::kb_insert(const std::u32string& t) {
@@ -620,7 +639,15 @@ void Overlay::Impl::draw_keyboard(double now_s) {
     bool closed = false;
 
     // The pad: presses since the last frame; a direction or B held past the delay repeats.
-    const uint64_t held = pad_held.load(), fresh = pad_new.exchange(0);
+    const uint64_t held = pad_held.load();
+    uint64_t fresh = pad_new.exchange(0);
+    // With Steam's keyboard the panel is only the question and the text field. Steam takes the pad while its keyboard is up, so a press
+    // that reaches the game means it is closed: the on-screen keys come up, and that press only shows them (+ and - keep their meaning).
+    const uint64_t plus_minus = hid::btn(hid::kBtnPlus) | hid::btn(hid::kBtnMinus);
+    if (!kb_keys && (fresh & ~plus_minus)) {
+        kb_keys = true;
+        fresh &= plus_minus;
+    }
     auto fired = [&](int slot, uint64_t bits) {
         bool f = false;
         if (fresh & bits) { f = true; kb_rep[slot] = now_s + kKbRepeatDelay; }
@@ -659,11 +686,13 @@ void Overlay::Impl::draw_keyboard(double now_s) {
     const float k = ui_scale > 0.f ? ui_scale : 1.f;
     const float w = std::max(320.f, std::min(760.f * k, disp.x - 32.f * k));
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 110));
-    ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    // centred; at the top when Steam's keyboard comes up from the bottom of the screen
+    if (kb_steam_want) ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, std::round(disp.y * 0.04f)), ImGuiCond_Always, ImVec2(0.5f, 0.f));
+    else ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(w, 0), ImGuiCond_Always);
     const std::string title = (kb_req.title.empty() ? std::string("Keyboard") : kb_req.title) + "###nxrt_swkbd";
     const ImGuiWindowFlags wf = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-                                ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar;
+                                ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoScrollbar | (kb_keys ? 0 : ImGuiWindowFlags_NoTitleBar);
     if (ImGui::Begin(title.c_str(), nullptr, wf)) {
         ImGui::PushTextWrapPos(0.f);
         if (!kb_req.header.empty()) ImGui::TextUnformatted(kb_req.header.c_str());
@@ -679,6 +708,12 @@ void Overlay::Impl::draw_keyboard(double now_s) {
         const float fw = ImGui::GetContentRegionAvail().x;
         ImGui::Dummy(ImVec2(fw, fh));
         const ImVec2 p1(p0.x + fw, p0.y + fh);
+        // Steam's keyboard, asked for once the field has its place (an auto-sized window takes its size in the frames after the first):
+        // Steam keeps the field uncovered and types into the window
+        if (kb_steam_want && !kb_steam_open && ++kb_frames >= 3) {
+            kb_steam_open = true;
+            host_steam_keyboard_open(static_cast<int>(p0.x), static_cast<int>(p0.y), static_cast<int>(fw), static_cast<int>(fh));
+        }
         ImDrawList* dl = ImGui::GetWindowDrawList();
         dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_FrameBg), style.FrameRounding);
         dl->AddRect(p0, p1, ImGui::GetColorU32(ImGuiCol_Border), style.FrameRounding);
@@ -715,7 +750,7 @@ void Overlay::Impl::draw_keyboard(double now_s) {
         const float kh = std::round(ImGui::GetFontSize() * 2.3f);
         const bool ok_allowed = kb_text.size() >= kb_req.min_len;
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(gap, gap));
-        for (int r = 0; r < nrows && !closed; ++r) {
+        for (int r = 0; r < nrows && !closed && kb_keys; ++r) {
             int x = 0;
             for (int i = 0; i < static_cast<int>(rows[r].size()) && !closed; ++i) {
                 const KbKey& key = rows[r][i];
@@ -755,9 +790,14 @@ void Overlay::Impl::draw_keyboard(double now_s) {
             // where a Switch pad has them
             const bool lab = kb_by_label.load(std::memory_order_relaxed);
             ImGui::PushTextWrapPos(0.f);
-            ImGui::TextDisabled("Pad: %s type, %s delete, %s space, %s shift, L/R move, + OK, - cancel", lab ? "A" : "A (right)", lab ? "B" : "B (bottom)",
-                                lab ? "Y" : "Y (left)", lab ? "X" : "X (top)");
-            ImGui::TextDisabled("Keyboard: type, Enter OK, Esc cancel, Ctrl+V paste");
+            if (!kb_keys) {
+                ImGui::TextDisabled("Type on Steam's keyboard, Enter to confirm. Steam + X brings it back; any button shows the on-screen keys.");
+            } else {
+                ImGui::TextDisabled("Pad: %s type, %s delete, %s space, %s shift, L/R move, + OK, - cancel", lab ? "A" : "A (right)",
+                                    lab ? "B" : "B (bottom)", lab ? "Y" : "Y (left)", lab ? "X" : "X (top)");
+                ImGui::TextDisabled("Keyboard: type, Enter OK, Esc cancel, Ctrl+V paste");
+                if (kb_steam_want) ImGui::TextDisabled("Steam keyboard: Steam + X");
+            }
             ImGui::PopTextWrapPos();
         }
     }

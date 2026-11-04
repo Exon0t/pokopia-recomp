@@ -12,4 +12,13 @@ namespace nxrt {
 // touchscreen or on-screen keyboard send mouse or keyboard input.
 bool host_is_handheld();
 
+// Steam's on-screen keyboard for text the game asks for (the software keyboard applet). Wanted on a handheld (host_is_handheld), on
+// SteamOS (SteamOS=1) and in Steam's gamepad UI (SteamGamepadUI=1); [applet] steam_keyboard = auto (default) | on | off overrides it.
+bool host_steam_keyboard_wanted();
+// Shows Steam's keyboard (steam://open/keyboard), keeping the text field at window pixels (x, y, w, h) uncovered; Steam types into the
+// window like a real keyboard. Close hides it again (steam://close/keyboard). Both return at once: a worker hands the URLs to Steam in
+// order (under Proton through the prefix's steam.exe, Proton's helper that forwards steam:// to the native client).
+void host_steam_keyboard_open(int x, int y, int w, int h);
+void host_steam_keyboard_close();
+
 }  // namespace nxrt
