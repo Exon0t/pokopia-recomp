@@ -7,6 +7,7 @@
 #include "nxrt/config.h"
 #include "nxrt/kernel.h"
 #include "nxrt/game.h"
+#include "nxrt/host_device.h"
 #include "nxrt/log.h"
 #include "nxrt/tt.h"
 #include "kernel_internal.h"
@@ -38,9 +39,10 @@ uint64_t system_tick() {
 namespace {
 // Short sleeps as real sleeps: under Wine, NtDelayExecution (not alertable) is a nanosleep on the host, good to tens of microseconds,
 // so a 100 us poll costs no processor time, but wakes ~50 us late (Linux timer slack). On Windows it rounds up to the timer's grid
-// (about half a millisecond or more). [kernel] short_sleep = auto (yield) | yield | sleep (only under Wine; Windows always yields).
-// Measured in game on the PC, uncapped: yielding 231 fps on 4.1 cores, sleeping 198 fps on 3.8 cores. Where the frame waits on the
-// GPU anyway (a Steam Deck) the lateness costs little and the processor time saved may be worth more: to be measured there.
+// (about half a millisecond or more). [kernel] short_sleep = auto | yield | sleep (sleep only under Wine; Windows always yields).
+// auto: sleep on a handheld (host_is_handheld), yield elsewhere. Measured in game: on the PC, uncapped, yielding 231 fps on 4.1 cores and sleeping 198 fps
+// on 3.8 cores; on a Steam Deck LCD, where the frame waits on the GPU anyway and CPU and GPU share one power budget, sleeping 54 fps
+// (1% lows ~30) against 52 yielding (lows ~27).
 // Pokopia polls its GPU fences with ~80 us SleepThread calls on two threads, thousands a second: yielded through, each keeps a
 // processor core busy for as long as the GPU takes, which on a Steam Deck also takes power from the GPU (one power budget).
 using NtDelayExecutionFn = LONG(WINAPI*)(BOOLEAN, PLARGE_INTEGER);
@@ -49,10 +51,10 @@ NtDelayExecutionFn short_sleep_fn() {
         HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
         const bool wine = ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
         const std::string m = config_get_str("kernel", "short_sleep", "auto");
-        const bool sleep = m == "sleep" && wine;
+        const bool sleep = wine && (m == "sleep" || (m == "auto" && host_is_handheld()));
         auto f = sleep && ntdll ? reinterpret_cast<NtDelayExecutionFn>(GetProcAddress(ntdll, "NtDelayExecution")) : nullptr;
         NXLOG_I("kernel", "short sleeps (up to 200 us): %s ([kernel] short_sleep = %s%s)", f ? "slept (NtDelayExecution)" : "yielded through",
-                m.c_str(), wine ? "" : ", Windows");
+                m.c_str(), !wine ? ", Windows" : m == "auto" ? (host_is_handheld() ? ", a handheld" : ", not a handheld") : "");
         return f;
     }();
     return fn;
