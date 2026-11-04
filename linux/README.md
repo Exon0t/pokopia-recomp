@@ -14,8 +14,9 @@ Experimental).
 2. **Game files**: press **Install**. It downloads the upstream Windows release (pinned by size and SHA-256), keeps what the
    game needs from it (upscalers, the recompiler, fonts, ...) and puts this fork's runtime in place of the release's. The game
    folder is `~/Games/PokopiaRecomp` unless you pick another.
-3. Choose your dump and press **Set up**: it checks the dump, recompiles the game code into `pkp.exe` (~10 min) and translates
-   the game's shaders (1-2 hours on a desktop; it can pause and continue).
+3. Choose your dump and press **Set up**: it checks the dump, recompiles the game code into `pkp.exe` (~5 min) and translates
+   the game's 99,000 shaders (~15 min; it can pause and continue). Measured on an 8-core Ryzen 7 9700X: 5.3 min building,
+   0.6 min finding the shaders, 13.2 min translating them (125 per second).
 4. **Play**: **Add to Steam** adds `pkp.exe` as a non-Steam game with Proton Experimental (restart Steam afterwards), then
    **Play** starts it through Steam. Without Steam it uses Wine if installed.
 
@@ -27,8 +28,9 @@ The dump is the usual layout: `base/` and `updates/<version>/`, each with `exefs
 
 ## Steam Deck
 
-Shader translation takes hours of CPU, so do the setup on a desktop and copy the finished game folder to the Deck. The shader
-cache is SPIR-V, which runs on any GPU, so a cache built on an NVIDIA desktop is fine on the Deck.
+Setup works on the Deck too, but its 4-core CPU makes it slower; setting up on a desktop (about 20 minutes on an 8-core PC)
+and copying the finished game folder to the Deck is quicker. The shader cache is SPIR-V, which runs on any GPU, so a cache
+built on an NVIDIA desktop is fine on the Deck.
 
 - **Put it on the internal SSD.** A microSD card works, but the first start reads ~2 GB of shaders and game data; from a card
   that is around 30 s before the title screen, from the SSD a few seconds.
