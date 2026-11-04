@@ -810,11 +810,7 @@ void swkbd_start(const std::shared_ptr<AppletState>& ap) {
         NXLOG_W("am", "swkbd: no keyboard config among the %zu storages pushed: defaults used", a.in_data.size());
     }
     r.max_len = max_len;
-    // Switch 2's keyboard (library version 0x140010, a 1328-byte config): Pokopia read the answer as single bytes although the byte at
-    // 0x3BD (UseUtf8 in the Switch layout) was 0; a name answered in UTF-16 came out as its first letter ("Alex" -> "A"). From library
-    // version 0x140000 on, the answer is UTF-8.
-    if (version >= 0x140000) a.utf8 = true;
-    // [applet] swkbd_utf8 = auto (as above) | 1 | 0: the encoding of the answer
+    // [applet] swkbd_utf8 = auto (the config's use_utf8) | 1 | 0: the encoding of the answer
     {
         const std::string e = nxrt::config_get_str("applet", "swkbd_utf8", "auto");
         if (e == "1" || e == "on" || e == "true") a.utf8 = true;
