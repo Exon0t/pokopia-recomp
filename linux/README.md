@@ -38,6 +38,8 @@ cache is SPIR-V, which runs on any GPU, so a cache built on an NVIDIA desktop is
 - Add it to Steam in Desktop Mode: the AppImage's **Add to Steam**, or by hand (*Add a Non-Steam Game*, `pkp.exe`, Start in =
   the folder, Compatibility: Proton Experimental). Then play from Game Mode.
 - The runtime recognises the Deck (Steam sets `SteamDeck=1`): it renders at 720p and shows the controller's button prompts.
+- When the game asks for a name, Steam's on-screen keyboard comes up by itself; its Enter confirms. Closing it and pressing any
+  button shows the game's own on-screen keys instead. `[applet] steam_keyboard = off` in `pkp.ini` keeps Steam's keyboard away.
   `[display] render_scale` in `controls.ini` overrides the resolution (`100` = 1080p), `[host] handheld = off` in `pkp.ini`
   turns the Deck defaults off.
 - Measured on a Deck LCD: 60 fps at the title screen and in the first areas at 1080p, 36-50 fps in busier ones (720p is the
