@@ -22,6 +22,38 @@ pub fn tools(app: &AppHandle) -> PathBuf {
     app.path().resource_dir().map(|d| d.join("linux-tools")).unwrap_or_else(|_| PathBuf::from("linux-tools"))
 }
 
+/// A command for a program of the host (Steam through steam_shortcut.py, Wine, xdg-open, the bundled scripts), with the
+/// environment the launcher had before the AppImage's AppRun set its own: PYTHONHOME and PYTHONPATH into the AppImage (Proton's
+/// launcher is a Python script, and Steam passes its environment to every game it starts: a Steam that the launcher started
+/// failed every game with "Failed to import encodings module"), the GTK, GIO, GStreamer, Qt and Perl paths, and the AppImage's
+/// entries in PATH, LD_LIBRARY_PATH and XDG_DATA_DIRS. Outside an AppImage (no APPDIR) nothing changes.
+fn host_cmd<S: AsRef<std::ffi::OsStr>>(program: S) -> Command {
+    let mut cmd = Command::new(program);
+    host_env(&mut cmd);
+    cmd
+}
+
+pub fn host_env(cmd: &mut Command) {
+    let appdir = match std::env::var("APPDIR") {
+        Ok(a) if !a.trim_end_matches('/').is_empty() => a.trim_end_matches('/').to_string(),
+        _ => return,
+    };
+    for (k, v) in std::env::vars_os() {
+        let (Some(k), Some(v)) = (k.to_str(), v.to_str()) else { continue };
+        if matches!(k, "APPDIR" | "APPIMAGE" | "ARGV0" | "OWD" | "PYTHONDONTWRITEBYTECODE") {
+            cmd.env_remove(k);
+        } else if v.contains(appdir.as_str()) {
+            // a list keeps its other entries; a single path into the AppImage goes
+            let kept: Vec<&str> = v.split(':').filter(|e| !e.is_empty() && !e.contains(appdir.as_str())).collect();
+            if v.contains(':') && !kept.is_empty() {
+                cmd.env(k, kept.join(":"));
+            } else {
+                cmd.env_remove(k);
+            }
+        }
+    }
+}
+
 pub fn python(t: &Path) -> PathBuf {
     t.join("python").join("bin").join("python3")
 }
@@ -71,7 +103,7 @@ pub fn release_installed(game_dir: &Path) -> bool {
 
 /// Runs one of the bundled Python scripts and parses the single JSON object it prints.
 fn run_json(t: &Path, name: &str, args: &[&str]) -> Result<Value, String> {
-    let out = Command::new(python(t))
+    let out = host_cmd(python(t))
         .arg("-I")
         .arg(script(t, name))
         .args(args)
@@ -108,7 +140,7 @@ pub fn play(t: &Path, game_dir: &Path) -> Result<String, String> {
     if which("wine").is_some() {
         let prefix = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".local/share/pokopia-recomp/wine");
         let _ = std::fs::create_dir_all(&prefix);
-        Command::new("wine")
+        host_cmd("wine")
             .arg(&exe)
             .args(["--log", "pkp.log"])
             .current_dir(game_dir)
@@ -139,7 +171,7 @@ pub fn missing_shaders(game_dir: &Path) -> usize {
 /// Translates the recorded shaders and adds them to the cache (pkp_linux.py refresh, with the bundled translator).
 pub fn refresh(t: &Path, game_dir: &Path) -> Result<String, String> {
     let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(1)).unwrap_or(2).max(1).to_string();
-    let out = Command::new(python(t))
+    let out = host_cmd(python(t))
         .arg("-I")
         .arg(script(t, "pkp_linux.py"))
         .args(["refresh", "--game"])
@@ -162,7 +194,7 @@ pub fn refresh(t: &Path, game_dir: &Path) -> Result<String, String> {
 /// fetch_release.py with its @progress lines handed to `report` as (done, total, text).
 pub fn install_release(t: &Path, game_dir: &Path, zip: Option<&str>, mut report: impl FnMut(u64, u64, String)) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
-    let mut cmd = Command::new(python(t));
+    let mut cmd = host_cmd(python(t));
     cmd.arg("-I").arg(script(t, "fetch_release.py")).arg("--dir").arg(game_dir);
     if let Some(z) = zip {
         cmd.arg("--zip").arg(z);
@@ -194,5 +226,5 @@ pub fn which(exe: &str) -> Option<PathBuf> {
 }
 
 pub fn open(path: &Path) -> Result<(), String> {
-    Command::new("xdg-open").arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
+    host_cmd("xdg-open").arg(path).spawn().map(|_| ()).map_err(|e| format!("Could not open {}: {}", path.display(), e))
 }

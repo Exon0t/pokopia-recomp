@@ -223,6 +223,26 @@ def account_dir(root):
     return os.path.join(ud, max(ids, key=used))
 
 
+def host_env():
+    """The environment for Steam and xdg-open without what the AppImage's AppRun set for the launcher: Steam passes its environment
+    to every game it starts, and PYTHONHOME into the AppImage made Proton's launcher (a Python script) fail with "Failed to import
+    encodings module". Entries pointing into the AppImage go (lists keep their other entries); outside an AppImage nothing changes."""
+    env = dict(os.environ)
+    appdir = env.get('APPDIR', '').rstrip('/')
+    if not appdir:
+        return env
+    for k in ('APPDIR', 'APPIMAGE', 'ARGV0', 'OWD', 'PYTHONDONTWRITEBYTECODE'):
+        env.pop(k, None)
+    for k, v in list(env.items()):
+        if appdir in v:
+            kept = [e for e in v.split(':') if e and appdir not in e]
+            if ':' in v and kept:
+                env[k] = ':'.join(kept)
+            else:
+                del env[k]
+    return env
+
+
 def steam_running():
     try:
         return subprocess.run(['pgrep', '-x', 'steam'], capture_output=True).returncode == 0
@@ -312,7 +332,7 @@ def add(exe, name, proton, close_steam):
     if steam_running():
         if not close_steam:
             raise Fail('Steam is running. Close Steam (Steam menu, Exit) and try again: it rewrites its settings when it exits.')
-        subprocess.run(['steam', '-shutdown'], capture_output=True, timeout=30)
+        subprocess.run(['steam', '-shutdown'], capture_output=True, timeout=30, env=host_env())
         for _ in range(60):
             if not steam_running():
                 break
@@ -364,7 +384,7 @@ def launch(exe):
     url = 'steam://rungameid/%d' % gameid
     for cmd in (['steam', url], ['xdg-open', url]):
         try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, env=host_env())
             return {'ok': True, 'url': url}
         except FileNotFoundError:
             continue
