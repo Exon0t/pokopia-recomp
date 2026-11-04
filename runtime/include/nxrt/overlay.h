@@ -55,6 +55,12 @@ public:
     // from the game. Returns the buttons the game must not see: all while the keyboard is open, then those still held from the press
     // that closed it until they are released. Call it on every pad poll.
     uint64_t set_keyboard_pad(uint64_t buttons, int lx, int ly);
+    // The controller's way into the menu (the F1 key's): View + Menu (Switch - and +, Xbox Back + Start) held together opens or closes it,
+    // and + alone closes it. Called on the thread that polls the pads, with the merged buttons, before the keyboard and the game see them;
+    // returns the buttons the game gets. Neither button of the pair reaches the game while the pair is held; a lone press of one is held
+    // back up to 80 ms in case the other follows (a quick tap still reaches the game, as a short press). Off while the on-screen keyboard
+    // is open (its + and - answer it). [gfx] overlay_pad_combo = false: off.
+    uint64_t menu_combo(uint64_t buttons);
     bool wants_input() const;                // visible and ImGui wants the mouse or keyboard
     bool wants_mouse() const;                // visible and the pointer is over the menu or a widget is being dragged
     bool wants_keyboard() const;             // visible and a text field or navigation has the keyboard

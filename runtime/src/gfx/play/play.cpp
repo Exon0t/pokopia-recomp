@@ -664,6 +664,7 @@ void poll_pads(uint64_t now) {
     // The on-screen keyboard reads the merged pad before it is held back; what it returns stays away from the game (everything while it is
     // open, then the button that closed it until it is released).
     if (st.overlay) {
+        pf.buttons = st.overlay->menu_combo(pf.buttons);     // View + Menu (- and +): the menu, as F1 does; the pair stays away from the game
         st.overlay->set_keyboard_abxy(st.settings.pad.label_abxy);
         pf.buttons &= ~st.overlay->set_keyboard_pad(pf.buttons, pf.left.x, pf.left.y);
     }

@@ -252,6 +252,14 @@ struct Overlay::Impl {
     // The pad (set_keyboard_pad, on the thread that polls it): what is held, and presses not yet taken by draw().
     std::atomic<uint64_t> pad_held{0}, pad_new{0};
     uint64_t pad_prev = 0, pad_mask = 0;  // set_keyboard_pad only
+    // The controller combo for the menu (menu_combo, on the thread that polls the pads).
+    uint64_t combo_prev = 0, combo_held_back = 0, combo_pulse = 0;
+    bool combo_latched = false;           // after the combo: - and + stay away from the game until both are released
+    double combo_held_until = 0, combo_pulse_until = 0;
+    // Controller navigation of the menu (draw(), under mu): the buttons fed to ImGui last frame.
+    uint64_t nav_prev = 0;
+    bool nav_on = false;
+    bool focus_panel = false;             // the menu was just shown: its first panel takes the focus (where the pad starts)
     // Steam's on-screen keyboard (host_steam_keyboard_*): wanted for the question on screen (a handheld, SteamOS, Steam's gamepad UI),
     // and asked for. It is asked for once the text field has a place on screen, and closed with the question.
     bool kb_steam_want = false, kb_steam_open = false;
@@ -267,6 +275,11 @@ struct Overlay::Impl {
     bool kb_key_event(const input::Event& e);   // a physical key or text; kb_mu and mu not held
     void draw_keyboard(double now_s);     // mu held, inside an ImGui frame
 };
+
+bool combo_on() {
+    static const bool on = config_get_bool("gfx", "overlay_pad_combo", true);
+    return on;
+}
 
 void Overlay::Impl::build_ui() {
     Renderer& r = *ctx.renderer;
@@ -361,11 +374,27 @@ void Overlay::Impl::build_ui() {
         }
     }
     ImGui::End();
-    for (auto& p : panels) {
+    for (size_t i = 0; i < panels.size(); ++i) {
+        auto& p = panels[i];
+        if (i == 0 && focus_panel) {          // just shown: the pad and the keyboard start in the settings, not in the diagnostics
+            ImGui::SetNextWindowFocus();
+            focus_panel = false;
+        }
         ImGui::SetNextWindowPos(ImVec2(16.f * k, 16.f * k), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize(ImVec2(std::min(760.f * k, std::max(240.f, disp.x - 32.f * k)), std::min(680.f * k, std::max(200.f, disp.y - 32.f * k))),
                                  ImGuiCond_FirstUseEver);
         if (ImGui::Begin(p.title.c_str())) p.fn();
+        ImGui::End();
+    }
+    // how to get around with a controller, at the bottom of the screen
+    if (combo_on()) {
+        const char* hint = "Controller: D-pad or left stick moves, A selects, B backs out. View + Menu (- and +) or + closes.";
+        const ImVec2 ts = ImGui::CalcTextSize(hint);
+        ImGui::SetNextWindowPos(ImVec2((disp.x - ts.x) * 0.5f - 8.f * k, disp.y - ts.y - 24.f * k));
+        ImGui::SetNextWindowBgAlpha(0.6f);
+        const ImGuiWindowFlags hf = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+        if (ImGui::Begin("##nxrt_pad_hint", nullptr, hf)) ImGui::TextDisabled("%s", hint);
         ImGui::End();
     }
 }
@@ -410,7 +439,8 @@ std::unique_ptr<Overlay> Overlay::create(const Context& ctx, std::string* error)
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;     // no imgui.ini next to the exe
     io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    io.BackendFlags |= ImGuiBackendFlags_HasGamepad;   // fed from the merged pad in draw() while the menu is shown
     ImGui::StyleColorsDark();
     io.Fonts->AddFontDefaultVector();          // the scalable default font: stays sharp at every UI scale (update_scale)
     ImGui::GetStyle().FontSizeBase = 16.0f;
@@ -459,6 +489,7 @@ void Overlay::set_visible(bool v) {
     if (s.visible == v) return;
     s.visible = v;
     if (v) {
+        s.focus_panel = true;
         s.restore_relative = platform::has_window() && platform::relative_mouse();
         if (s.restore_relative) platform::set_relative_mouse(false);
     } else {
@@ -809,6 +840,48 @@ bool Overlay::keyboard_open() const { return impl_->kb_poll(); }
 bool Overlay::blocks_game() const { return impl_->visible || impl_->kb_poll(); }
 void Overlay::set_keyboard_abxy(bool by_label) { impl_->kb_by_label.store(by_label, std::memory_order_relaxed); }
 
+uint64_t Overlay::menu_combo(uint64_t buttons) {
+    Impl& s = *impl_;
+    if (!combo_on() || s.kb_open.load()) {
+        s.combo_prev = buttons;
+        return buttons;
+    }
+    constexpr uint64_t kMinus = hid::btn(hid::kBtnMinus), kPlus = hid::btn(hid::kBtnPlus), kPair = kMinus | kPlus;
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    const uint64_t pm = buttons & kPair, fresh = pm & ~s.combo_prev;
+    s.combo_prev = pm;
+    if (s.combo_latched) {                      // after the combo (or + closing the menu): the pair stays away until both are released
+        if (!pm) s.combo_latched = false;
+        return buttons & ~kPair;
+    }
+    if (pm == kPair || (s.visible && (fresh & kPlus))) {   // both held, or + alone while the menu is shown
+        set_visible(!s.visible.load());
+        s.combo_latched = true;
+        s.combo_held_back = s.combo_pulse = 0;
+        return buttons & ~kPair;
+    }
+    if (s.visible) return buttons;              // the menu holds the pad back from the game anyway (blocks_game)
+    if (fresh) {                                // a lone - or +: held back briefly in case the other follows
+        s.combo_held_back = fresh;
+        s.combo_held_until = now + 0.08;
+    }
+    if (s.combo_held_back) {
+        if (pm & s.combo_held_back) {
+            if (now < s.combo_held_until) return buttons & ~s.combo_held_back;
+            s.combo_held_back = 0;               // a real press: the game has it from now on, 80 ms late
+        } else {                                // let go inside the window: the game gets it as a short press
+            s.combo_pulse = s.combo_held_back;
+            s.combo_pulse_until = now + 0.08;
+            s.combo_held_back = 0;
+        }
+    }
+    if (s.combo_pulse) {
+        if (now < s.combo_pulse_until) buttons |= s.combo_pulse;
+        else s.combo_pulse = 0;
+    }
+    return buttons;
+}
+
 uint64_t Overlay::set_keyboard_pad(uint64_t buttons, int lx, int ly) {
     Impl& s = *impl_;
     constexpr int kHalf = 16384;     // half of the hid stick range
@@ -1052,6 +1125,31 @@ void Overlay::draw(const FrameInfo& f) {
     io.DisplaySize = ImVec2(static_cast<float>(f.extent.width), static_cast<float>(f.extent.height));
 
     s.update_scale(f.extent);
+    // The pad navigates the menu (ImGui's gamepad navigation): what changed since the last frame. The buttons held when it opens (the
+    // combo itself) count as already pressed, so they do nothing in it.
+    if (s.visible && !kb_on) {
+        const uint64_t held = s.pad_held.load();
+        if (!s.nav_on) {
+            s.nav_on = true;
+            s.nav_prev = held;
+        }
+        static const std::pair<hid::NpadButtonBit, ImGuiKey> kNav[] = {
+            {hid::kBtnUp, ImGuiKey_GamepadDpadUp},          {hid::kBtnDown, ImGuiKey_GamepadDpadDown},
+            {hid::kBtnLeft, ImGuiKey_GamepadDpadLeft},      {hid::kBtnRight, ImGuiKey_GamepadDpadRight},
+            {hid::kBtnStickLUp, ImGuiKey_GamepadLStickUp},  {hid::kBtnStickLDown, ImGuiKey_GamepadLStickDown},
+            {hid::kBtnStickLLeft, ImGuiKey_GamepadLStickLeft}, {hid::kBtnStickLRight, ImGuiKey_GamepadLStickRight},
+            {hid::kBtnA, ImGuiKey_GamepadFaceDown},         {hid::kBtnB, ImGuiKey_GamepadFaceRight},
+            {hid::kBtnX, ImGuiKey_GamepadFaceUp},           {hid::kBtnY, ImGuiKey_GamepadFaceLeft},
+            {hid::kBtnL, ImGuiKey_GamepadL1},               {hid::kBtnR, ImGuiKey_GamepadR1},
+            {hid::kBtnZL, ImGuiKey_GamepadL2},              {hid::kBtnZR, ImGuiKey_GamepadR2},
+        };
+        const uint64_t changed = held ^ s.nav_prev;
+        for (const auto& [b, key] : kNav)
+            if (changed & hid::btn(b)) io.AddKeyEvent(key, (held & hid::btn(b)) != 0);
+        s.nav_prev = held;
+    } else {
+        s.nav_on = false;
+    }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     if (s.visible && !kb_on) s.build_ui();    // the keyboard is modal: the menu comes back once it is answered
