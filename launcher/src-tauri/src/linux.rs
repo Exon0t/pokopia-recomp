@@ -191,6 +191,45 @@ pub fn refresh(t: &Path, game_dir: &Path) -> Result<String, String> {
     }
 }
 
+/// One hidden run of the game at the end of setup (pkp_linux.py warmup --if-needed): the game plays ~60 s without a window or sound,
+/// through Steam's Proton (as Steam runs it) or Wine, records the shaders it builds while it runs (the game files cannot have them;
+/// Ditto is black without them) and they are translated, so the first start has them, also from Steam. Skipped once run-time shaders
+/// were collected. Cancel stops it (SIGINT: the script stops the game too). Ok(the script's last line).
+pub fn warm_up(t: &Path, game_dir: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<String, String> {
+    use std::io::Read;
+    let jobs = std::thread::available_parallelism().map(|n| n.get().saturating_sub(1)).unwrap_or(2).max(1).to_string();
+    let mut child = host_cmd(python(t))
+        .arg("-I")
+        .arg(script(t, "pkp_linux.py"))
+        .args(["warmup", "--if-needed", "--game"])
+        .arg(game_dir)
+        .arg("--harness")
+        .arg(harness(t))
+        .args(["--jobs", &jobs])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start the hidden run: {}", e))?;
+    let status = loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            break st;
+        }
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = host_cmd("kill").args(["-INT", &child.id().to_string()]).status();
+            let _ = child.wait();
+            return Err("cancelled".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut text);
+    }
+    let last = text.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("").trim().to_string();
+    if status.success() { Ok(last) } else { Err(last) }
+}
+
 /// fetch_release.py with its @progress lines handed to `report` as (done, total, text).
 pub fn install_release(t: &Path, game_dir: &Path, zip: Option<&str>, mut report: impl FnMut(u64, u64, String)) -> Result<(), String> {
     use std::io::{BufRead, BufReader};

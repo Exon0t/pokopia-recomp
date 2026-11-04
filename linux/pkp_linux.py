@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -33,6 +34,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 DEFAULT_GAME = os.path.expanduser('~/Games/PokopiaRecomp')
 DEFAULT_PREFIX = os.path.expanduser('~/.local/share/pokopia-recomp/wine')
+PROTON_DATA = os.path.expanduser('~/.local/share/pokopia-recomp/proton')   # the warm-up's Proton prefix (STEAM_COMPAT_DATA_PATH)
+STEAM_ROOTS = ('~/.local/share/Steam', '~/.steam/steam', '~/.steam/root', '~/.var/app/com.valvesoftware.Steam/.local/share/Steam')
+WARMUP_SECONDS = 60                  # the opening asks for its run-time shaders in its first ~25 s
 VENV_PY = os.path.join(REPO, 'tools', '.venv', 'bin', 'python')
 EXEFS_FILES = ('main', 'sdk', 'subsdk0', 'rtld', 'main.npdm')
 NSO_FILES = ('main', 'sdk', 'subsdk0', 'rtld')
@@ -425,7 +429,7 @@ def refresh_shaders(game, jobs, harness, prefix):
     missing, spirv = os.path.join(game, MISSING_REL), os.path.join(game, SPIRV_REL)
     if not missing_count(game):
         say('No missing shaders recorded yet. Play for a while (the game saves the ones it lacks to %s), then run refresh again.' % MISSING_REL)
-        return
+        return 0
     results = os.path.join(spirv, 'results.tsv')
     have = {r.split('\t', 1)[0] for r in read_tsv(results)[1]} if os.path.isfile(results) else set()
     stage = os.path.join(game, 'shader_cache', 'stage_missing')
@@ -442,6 +446,7 @@ def refresh_shaders(game, jobs, harness, prefix):
         status[s] = status.get(s, 0) + 1
     say('Added %d shader(s) to the cache (%s). They are used from the next start of the game.'
         % (len(rows), ', '.join('%d %s' % (n, s) for s, n in sorted(status.items())) or 'none new'))
+    return len(rows)
 
 
 def build_shaders(game, exefs, romfs, jobs, harness, prefix):
@@ -532,11 +537,115 @@ def play(game, prefix, offline, extra):
 
 # ---------------------------------------------------------------------------------------------------------------- main
 
+# ---------------------------------------------------------------------------------------------------------------- warm-up
+
+def steam_libraries():
+    """(Steam root, [library folders]) from libraryfolders.vdf; (None, []) without Steam."""
+    for r in STEAM_ROOTS:
+        root = os.path.realpath(os.path.expanduser(r))
+        vdf = os.path.join(root, 'steamapps', 'libraryfolders.vdf')
+        if os.path.isfile(vdf):
+            libs = [root] + re.findall(r'"path"\s+"([^"]+)"', open(vdf, encoding='utf-8', errors='replace').read())
+            seen, out = set(), []
+            for lib in libs:
+                lib = os.path.realpath(lib.replace('\\\\', '\\'))
+                if lib not in seen and os.path.isdir(os.path.join(lib, 'steamapps')):
+                    seen.add(lib)
+                    out.append(lib)
+            return root, out
+    return None, []
+
+
+def find_proton():
+    """[command prefix], env, label for Steam's Proton (Experimental first, else the newest Proton N.N), inside the Steam Linux Runtime
+    container its toolmanifest.vdf asks for when that is installed (as Steam starts it). None without Steam or Proton."""
+    root, libs = steam_libraries()
+    if not root:
+        return None
+    found = []
+    for lib in libs:
+        common = os.path.join(lib, 'steamapps', 'common')
+        for name in (os.listdir(common) if os.path.isdir(common) else []):
+            if name.startswith('Proton') and os.path.isfile(os.path.join(common, name, 'proton')):
+                found.append((name, os.path.join(common, name)))
+    if not found:
+        return None
+    def rank(item):
+        name = item[0]
+        if 'Experimental' in name:
+            return (2, ())
+        nums = tuple(int(x) for x in re.findall(r'\d+', name))
+        return (1, nums) if nums else (0, ())
+    name, pdir = max(found, key=rank)
+    cmd = [os.path.join(pdir, 'proton'), 'waitforexitandrun']
+    label = name
+    manifest = os.path.join(pdir, 'toolmanifest.vdf')
+    tool = re.search(r'"require_tool_appid"\s+"(\d+)"', open(manifest, encoding='utf-8', errors='replace').read()) if os.path.isfile(manifest) else None
+    if tool:
+        for lib in libs:
+            acf = os.path.join(lib, 'steamapps', 'appmanifest_%s.acf' % tool.group(1))
+            m = re.search(r'"installdir"\s+"([^"]+)"', open(acf, encoding='utf-8', errors='replace').read()) if os.path.isfile(acf) else None
+            entry = os.path.join(lib, 'steamapps', 'common', m.group(1), '_v2-entry-point') if m else ''
+            if entry and os.path.isfile(entry):
+                cmd = [entry, '--verb=waitforexitandrun', '--'] + cmd
+                label += ' in ' + m.group(1)
+                break
+    os.makedirs(PROTON_DATA, exist_ok=True)
+    env = dict(os.environ, STEAM_COMPAT_DATA_PATH=PROTON_DATA, STEAM_COMPAT_CLIENT_INSTALL_PATH=root)
+    return cmd, env, label
+
+
+def runtime_collected(game):
+    """Whether run-time shaders were collected already (shader_cache/runtime holds what refresh translated)."""
+    return len(read_tsv(os.path.join(game, RUNTIME_REL, 'manifest.tsv'))[1]) > 0 if os.path.isfile(os.path.join(game, RUNTIME_REL, 'manifest.tsv')) else False
+
+
+def warm_up(game, jobs, harness, prefix):
+    """Runs the game once without a window or sound for WARMUP_SECONDS, so the shaders it builds while it runs (the romfs cannot have
+    them: ~212 in the opening, Ditto is black without them) are recorded, then translates them. The first real start then has them,
+    also when it is started from Steam. A save folder of its own (shader_cache/warmup/save): the player's save is never touched.
+    Proton (as Steam runs the game) when Steam has one, else Wine. Returns how many were translated; raises Fail when it cannot run."""
+    if not os.path.isfile(os.path.join(game, 'pkp.exe')):
+        raise Fail('pkp.exe is not built yet.')
+    runner = find_proton()
+    if runner is None:
+        if not shutil.which('wine'):
+            raise Fail('Neither Steam\'s Proton nor Wine was found to run the game once.')
+        os.makedirs(prefix, exist_ok=True)
+        runner = (['wine'], wine_env(prefix), 'Wine')
+    cmd, env, label = runner
+    scratch_rel = os.path.join('shader_cache', 'warmup')
+    scratch = os.path.join(game, scratch_rel)
+    shutil.rmtree(scratch, ignore_errors=True)
+    os.makedirs(os.path.join(scratch, 'save'), exist_ok=True)
+    # relative paths: the game's working directory is the game folder under Wine and Proton alike; environment variables win over pkp.ini
+    env.update(NXRT_FS_SAVE_DIR=os.path.join(scratch_rel, 'save'), NXRT_NVN_DUMP_MISSING=MISSING_REL, NXRT_AUDIO_SINK='null')
+    before = missing_count(game)
+    say('Running the game once in the background (%s, about %d s) to record the shaders it builds while it runs...' % (label, WARMUP_SECONDS))
+    p = subprocess.Popen(cmd + [os.path.join(game, 'pkp.exe'), '--headless', '--max-seconds', str(WARMUP_SECONDS),
+                                '--log', os.path.join(scratch_rel, 'warmup.log')],
+                         cwd=game, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    try:
+        p.wait(timeout=WARMUP_SECONDS + 240)      # a first Proton start also creates its prefix
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, 9)
+        p.wait()
+    except KeyboardInterrupt:
+        os.killpg(p.pid, 9)
+        raise
+    recorded = missing_count(game) - before
+    say('The run recorded %d shader(s).' % max(0, recorded))
+    n = refresh_shaders(game, jobs, harness, prefix) if missing_count(game) else 0
+    shutil.rmtree(os.path.join(scratch, 'save'), ignore_errors=True)
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     jobs_default = max(1, (os.cpu_count() or 2) - 1)
-    for name in ('check', 'setup', 'play', 'refresh', 'status'):
+    for name in ('check', 'setup', 'play', 'refresh', 'warmup', 'status'):
         s = sub.add_parser(name)
         s.add_argument('--game', default=DEFAULT_GAME, help='release folder (default %(default)s)')
         s.add_argument('--prefix', default=DEFAULT_PREFIX, help='Wine prefix (default %(default)s)')
@@ -546,7 +655,11 @@ def main():
             s.add_argument('--exefs', help='exefs folder, when it is not inside --dump (overrides the one found there)')
             s.add_argument('--romfs', help='romfs folder, when it is not inside --dump (overrides the one found there)')
             s.add_argument('--no-shaders', action='store_true', help='stop after building pkp.exe')
-        if name in ('setup', 'refresh'):
+        if name == 'setup':
+            s.add_argument('--no-warmup', action='store_true', help='skip the one hidden run of the game at the end')
+        if name == 'warmup':
+            s.add_argument('--if-needed', action='store_true', help='only while no run-time shaders were collected yet')
+        if name in ('setup', 'refresh', 'warmup'):
             s.add_argument('--jobs', type=int, default=jobs_default)
             s.add_argument('--harness', help='natively built spirv_harness (.dll for dotnet, or an executable) instead of the release one under Wine')
         if name == 'play':
@@ -595,6 +708,11 @@ def main():
                 say('\npkp.exe is built. Run setup again without --no-shaders for the shader cache.')
                 return 0
             build_shaders(game, exefs, romfs, a.jobs, a.harness, a.prefix)
+            if not a.no_warmup and not runtime_collected(game):
+                try:
+                    warm_up(game, a.jobs, a.harness, os.path.abspath(os.path.expanduser(a.prefix)))
+                except Fail as e:                        # not fatal: the first start records them instead (refresh translates them)
+                    say('The hidden run was skipped (%s) The first start records the shaders instead; run refresh after it.' % e)
             say('\nSetup finished. Play with:  python3 %s play' % os.path.relpath(__file__))
         elif a.cmd == 'status':
             m = read_marker(game)
@@ -605,6 +723,11 @@ def main():
             say('missing       %d shader(s) recorded while playing%s' % (missing_count(game), ' (run refresh)' if missing_count(game) else ''))
         elif a.cmd == 'refresh':
             refresh_shaders(game, a.jobs, a.harness, os.path.abspath(os.path.expanduser(a.prefix)))
+        elif a.cmd == 'warmup':
+            if a.if_needed and runtime_collected(game):
+                say('The run-time shaders were collected already; no hidden run needed.')
+            else:
+                warm_up(game, a.jobs, a.harness, os.path.abspath(os.path.expanduser(a.prefix)))
         elif a.cmd == 'play':
             play(game, os.path.abspath(os.path.expanduser(a.prefix)), a.offline, [x for x in a.extra if x != '--'])
     except Fail as e:
