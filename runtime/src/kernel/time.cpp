@@ -2,8 +2,12 @@
 // System tick and high-resolution sleep. Pattern from smo-recomp runtime/os/os_threads.c sleep_ns and SuperMarioWonderRecomp kernel.cpp system_tick.
 #include <windows.h>
 
+#include <string>
+
+#include "nxrt/config.h"
 #include "nxrt/kernel.h"
 #include "nxrt/game.h"
+#include "nxrt/log.h"
 #include "nxrt/tt.h"
 #include "kernel_internal.h"
 
@@ -32,6 +36,28 @@ uint64_t system_tick() {
 // 1 ms or 15.6 ms grid, so the wait runs on a high-resolution waitable timer (100 ns units); Sleep() is only the fallback.
 // A zero or negative span yields, as on the console.
 namespace {
+// Short sleeps as real sleeps: under Wine, NtDelayExecution (not alertable) is a nanosleep on the host, good to tens of microseconds,
+// so a 100 us poll costs no processor time, but wakes ~50 us late (Linux timer slack). On Windows it rounds up to the timer's grid
+// (about half a millisecond or more). [kernel] short_sleep = auto (yield) | yield | sleep (only under Wine; Windows always yields).
+// Measured in game on the PC, uncapped: yielding 231 fps on 4.1 cores, sleeping 198 fps on 3.8 cores. Where the frame waits on the
+// GPU anyway (a Steam Deck) the lateness costs little and the processor time saved may be worth more: to be measured there.
+// Pokopia polls its GPU fences with ~80 us SleepThread calls on two threads, thousands a second: yielded through, each keeps a
+// processor core busy for as long as the GPU takes, which on a Steam Deck also takes power from the GPU (one power budget).
+using NtDelayExecutionFn = LONG(WINAPI*)(BOOLEAN, PLARGE_INTEGER);
+NtDelayExecutionFn short_sleep_fn() {
+    static const NtDelayExecutionFn fn = [] () -> NtDelayExecutionFn {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        const bool wine = ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+        const std::string m = config_get_str("kernel", "short_sleep", "auto");
+        const bool sleep = m == "sleep" && wine;
+        auto f = sleep && ntdll ? reinterpret_cast<NtDelayExecutionFn>(GetProcAddress(ntdll, "NtDelayExecution")) : nullptr;
+        NXLOG_I("kernel", "short sleeps (up to 200 us): %s ([kernel] short_sleep = %s%s)", f ? "slept (NtDelayExecution)" : "yielded through",
+                m.c_str(), wine ? "" : ", Windows");
+        return f;
+    }();
+    return fn;
+}
+
 void sleep_once(int64_t ns) {
     static thread_local HANDLE timer = nullptr;
     static thread_local bool no_timer = false;
@@ -42,6 +68,12 @@ void sleep_once(int64_t ns) {
     // Short sleeps (polls such as Pokopia's GPU-fence wait, 100 us a round) overshoot to about half a millisecond on the timer: yield until the
     // deadline instead. Longer ones keep the timer (no busy waiting while a thread idles).
     if (ns <= 200000) {
+        if (NtDelayExecutionFn delay = short_sleep_fn()) {
+            LARGE_INTEGER span;
+            span.QuadPart = -((ns + 99) / 100);             // relative, in 100 ns units
+            delay(FALSE, &span);
+            return;
+        }
         LARGE_INTEGER f, s, n;
         QueryPerformanceFrequency(&f);
         QueryPerformanceCounter(&s);

@@ -7,6 +7,7 @@
 #include <set>
 
 #include "nxrt/config.h"
+#include "nxrt/host_device.h"
 #include "nxrt/game.h"
 #include "nxrt/ipc.h"
 #include "nxrt/kernel.h"
@@ -316,7 +317,15 @@ TitleProfile load_profile() {
     p.region = parse_region(config_get_str("system", "region", ""), p.region);
     p.firmware = config_get_str("system", "firmware", p.firmware.c_str());
     p.device_nickname = config_get_str("system", "nickname", p.device_nickname.c_str());
-    p.docked = lower(config_get_str("am", "operation_mode", "docked")) != "handheld";
+    // [am] operation_mode = auto (default) | docked | handheld. auto: handheld on a handheld PC (host_is_handheld), docked elsewhere.
+    // In handheld mode the game picks its own lighter graphics settings, as on the console's own screen: in game on the PC ~14% more
+    // frames, on a Legion Go S (featureJosh's fork) 50-57 -> 62-69 fps.
+    {
+        const std::string m = lower(config_get_str("am", "operation_mode", "auto"));
+        p.docked = m == "auto" ? !host_is_handheld() : m != "handheld";
+        NXLOG_I("am", "operation mode: %s ([am] operation_mode = %s%s)", p.docked ? "docked" : "handheld", m.c_str(),
+                m == "auto" ? (p.docked ? ", not a handheld" : ", a handheld") : "");
+    }
     p.user_nickname = config_get_str("account", "nickname", p.user_nickname.c_str());
     uint64_t hi, lo;
     if (parse_uid(config_get_str("account", "uid", ""), hi, lo)) {
