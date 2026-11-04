@@ -42,8 +42,7 @@ cache is SPIR-V, which runs on any GPU, so a cache built on an NVIDIA desktop is
   button shows the game's own on-screen keys instead. `[applet] steam_keyboard = off` in `pkp.ini` keeps Steam's keyboard away.
   `[display] render_scale` in `controls.ini` overrides the resolution (`100` = 1080p), `[host] handheld = off` in `pkp.ini`
   turns the Deck defaults off.
-- Measured on a Deck LCD: 60 fps at the title screen and in the first areas at 1080p, 36-50 fps in busier ones (720p is the
-  default for that reason).
+- On a Deck LCD the game plays at about 30 fps (720p, the default).
 - The first start after a new shader cache takes longest: the game writes `shader_cache/spirv.preload.pack` in the background
   once it has loaded, and later starts read that one file instead of thousands.
 
