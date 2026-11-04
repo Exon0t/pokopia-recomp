@@ -345,6 +345,7 @@ private:
 
     mutable std::mutex lock_;
     std::string dir_;
+    std::string override_dir_;                                              // [nvn] shader_override, empty when off
     bool open_ = false;
     std::string results_;                                                   // results.tsv, read once
     int resources_col_ = -1;                                                // column index of "resources"

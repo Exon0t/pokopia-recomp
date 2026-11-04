@@ -511,7 +511,52 @@ bool create_sparse_texture(Texture* t, TexGpu* g, const Shape& s, std::string* w
 
 // ---- creation -------------------------------------------------------------------------------------------------------------
 // Makes the image of t (or the failed marker when no format works). Stores the result in t->gpu, which is never null afterwards.
+// Once per run: every format of the NVN table, as the image code would make it on this GPU (its Vulkan format, else the fallback), with
+// what the GPU cannot do with it in optimal tiling: sampled (S), linear filtering (L), colour attachment (C), blending (B), storage (T),
+// depth attachment (D), and as a uniform texel buffer (U). A GPU difference (AMD vs NVIDIA) in a format the game uses is a candidate for a
+// picture that is right on one and wrong on the other. ASTC is left out (BC7 stand-ins where the GPU has no ASTC).
+void report_format_support() {
+    const VkPhysicalDevice pd = device().physical();
+    int listed = 0;
+    for (int i = 0; i < format_count(); ++i) {
+        const FormatInfo* f = format_at(i);
+        if (!f || f->astc || f->vk == VK_FORMAT_UNDEFINED) continue;
+        VkFormatProperties fp = {};
+        VkFormat v = f->vk;
+        vkGetPhysicalDeviceFormatProperties(pd, v, &fp);
+        const VkFormatFeatureFlags want_img = f->aspect == kAspectColor ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT : VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        bool fell_back = false;
+        if (!(fp.optimalTilingFeatures & want_img) && f->vk_fallback != VK_FORMAT_UNDEFINED) {
+            v = f->vk_fallback;
+            vkGetPhysicalDeviceFormatProperties(pd, v, &fp);
+            fell_back = true;
+        }
+        const VkFormatFeatureFlags o = fp.optimalTilingFeatures;
+        std::string miss;
+        auto need = [&](VkFormatFeatureFlags bit, char c) { if (!(o & bit)) miss += c; };
+        need(VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT, 'S');
+        if (!f->is_int && !f->is_uint) need(VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT, 'L');
+        if (f->aspect == kAspectColor) {
+            if (!f->compressed) {
+                need(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, 'C');
+                if (!f->is_int && !f->is_uint) need(VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT, 'B');
+                need(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT, 'T');
+                if (!(fp.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT)) miss += 'U';
+            }
+        } else {
+            need(VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, 'D');
+        }
+        if (miss.empty() && !fell_back) continue;
+        ++listed;
+        NXLOG_I(kTag, "format %s: Vulkan %d%s, cannot: %s", f->name, static_cast<int>(v), fell_back ? " (fallback)" : "", miss.empty() ? "-" : miss.c_str());
+    }
+    NXLOG_I(kTag, "format report: %d of %d NVN formats have a fallback or a missing feature here (S sampled, L linear filter, C colour "
+                  "attachment, B blend, T storage, D depth attachment, U uniform texel buffer)", listed, format_count());
+}
+
 TexGpu* create_texture_gpu(Texture* t, float want_scale) {
+    static std::once_flag reported;
+    std::call_once(reported, report_format_support);
     auto* g = new TexGpu();
     { std::lock_guard<std::mutex> lk(g_live_mu); g_live_set.insert(g); }
     g_gauge_textures_live.add(1);
@@ -576,6 +621,9 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         why = r;
     }
     if (chosen == VK_FORMAT_UNDEFINED) return fail(why);
+    if (first_time(std::string("first fmt ") + g->fmt->name))
+        NXLOG_I(kTag, "texture %u: the first %s texture (Vulkan %d, %ux%u, %u levels, %u layers, flags 0x%x)", t->id, g->fmt->name, static_cast<int>(chosen),
+                s.base.width, s.base.height, s.levels, s.layers, static_cast<unsigned>(t->b.flags));
 
     if (const VkFormat hf = extras::hdr_promote_target(chosen, t->b.flags, s.type == VK_IMAGE_TYPE_2D, s.levels, s.layers, s.samples, g->fmt->srgb)) {
         if (device().image_supported(make_desc(s, hf, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, base_flags(s, hf)))) {

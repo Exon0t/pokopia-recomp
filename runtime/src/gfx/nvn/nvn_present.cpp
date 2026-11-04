@@ -3,6 +3,7 @@
 // The shell's FrameLimiter, when given, paces the frame (begin_frame before the image is acquired).
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <vector>
 
@@ -80,6 +81,24 @@ void present_on_render_thread(Window* w, int index, bool again) {
     }
     if (!again) {
         const int64_t n = static_cast<int64_t>(counters().presents.load());
+        {
+            static int last_ph = -1, cycle_n = 0, shot_key = -1;
+            bool mid = false;
+            const int ph = skip_cycle_phase(&mid);
+            if (ph >= 0) {
+                if (ph == 0 && last_ph > 0) ++cycle_n;
+                last_ph = ph;
+                if (mid && shot_key != cycle_n * 100 + ph) {
+                    shot_key = cycle_n * 100 + ph;
+                    if (!g_shots_read) read_shots();
+                    static const bool made = [] { std::error_code ec; std::filesystem::create_directories(g_shot_dir, ec); return true; }();
+                    (void)made;
+                    char name[64];
+                    std::snprintf(name, sizeof name, "/cycle_%03d_p%d.png", cycle_n, ph);
+                    rend->request_screenshot(g_shot_dir + name);
+                }
+            }
+        }
         if (shot_wanted(n)) {
             char name[64];
             std::snprintf(name, sizeof name, "/%06lld.png", static_cast<long long>(n));

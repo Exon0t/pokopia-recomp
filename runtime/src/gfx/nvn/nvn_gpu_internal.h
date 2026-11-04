@@ -160,6 +160,8 @@ void mirror_destroy(PoolGpu* p);
 // game pipeline: a VkPipelineShaderStageRequiredSubgroupSizeCreateInfo asking for 32 (static, shareable) when the GPU's subgroups are not
 // 32 wide and it can be asked for that stage (AMD runs 64 wide by default); null otherwise (NVIDIA, or a stage that cannot ask).
 const void* subgroup32_info(VkShaderStageFlagBits stage);
+// [nvn] skip_fs_cycle (nvn_replay.cpp): the current phase (0 = none skipped, -1 = off); mid: in the middle of the phase.
+int skip_cycle_phase(bool* mid);
 
 void shadow_before_submit(VkCommandBuffer cb, uint64_t serial);
 // Any thread, from read_completed before a serial is published as done: writes back the results of the submissions done by then.

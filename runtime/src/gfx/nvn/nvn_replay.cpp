@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -265,11 +266,43 @@ std::vector<int64_t> g_trace_extra;   // more frames to trace
 // (a frame number is not stable from run to run: the load times differ).
 std::string g_trigger_fs;
 
+}  // namespace
+
+// The current phase of [nvn] skip_fs_cycle (0 = skip nothing; -1 = no cycle). mid: set when the phase is in its middle second.
+int skip_cycle_phase(bool* mid) {
+    static const std::string list = nxrt::config_get_str("nvn", "skip_fs_cycle", "");
+    if (list.empty()) return -1;
+    static const int n = 1 + static_cast<int>(std::count(list.begin(), list.end(), ',')) + 1;   // phase 0 + one per hash
+    static const double period = static_cast<double>(std::max<int64_t>(2, nxrt::config_get_int("nvn", "skip_fs_cycle_s", 4)));
+    static const auto t0 = std::chrono::steady_clock::now();
+    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const double in = std::fmod(s, period);
+    if (mid) *mid = in >= period * 0.5 && in < period * 0.5 + 0.5;
+    return static_cast<int>(s / period) % n;
+}
+
+namespace {
+
 // Debug: [nvn] skip_fs_file = FILE (env NXRT_NVN_SKIP_FS_FILE). FILE holds fragment shader hash prefixes separated by blanks; draws whose fragment
 // shader starts with one of them are not drawn. The file is read again twice a second, so it can change while the game runs.
 std::vector<std::string> g_skip_fs;
 int g_draw_idx = 0;   // draws begun in this frame
 bool skip_fs_draw(const std::string& hash) {
+    // [nvn] skip_fs_cycle = "h1,h2,..." (env NXRT_NVN_SKIP_FS_CYCLE), [nvn] skip_fs_cycle_s = 4: phases of that many seconds, repeating:
+    // phase 0 skips nothing, phase k skips draws whose fragment shader starts with h_k; nvn_present.cpp saves a screenshot in the middle of
+    // each phase (<shot_dir>/cycle_<n>_p<k>.png). For finding, on a machine without a debugger at hand, which pass makes a picture wrong.
+    if (const int ph = skip_cycle_phase(nullptr); ph > 0) {
+        static const std::vector<std::string> cyc = [] {
+            std::vector<std::string> v;
+            std::string s = nxrt::config_get_str("nvn", "skip_fs_cycle", ""), w;
+            for (char c : s + ",") {
+                if (c == ',' || c == ' ') { if (!w.empty()) v.push_back(w); w.clear(); }
+                else w += c;
+            }
+            return v;
+        }();
+        if (ph <= static_cast<int>(cyc.size()) && hash.compare(0, cyc[ph - 1].size(), cyc[ph - 1]) == 0) return true;
+    }
     static const std::string file = nxrt::config_get_str("nvn", "skip_fs_file", "");
     if (file.empty()) return false;
     static std::chrono::steady_clock::time_point last{};

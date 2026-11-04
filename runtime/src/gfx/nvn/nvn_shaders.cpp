@@ -991,6 +991,12 @@ bool ShaderCache::pack_read(const std::string& hash, std::string& out) {
 }
 
 bool ShaderCache::read_spv(const std::string& hash, std::string& out) {
+    // [nvn] shader_override: a folder whose <hash>.spv files replace the cache's (and the pack's), for testing a changed shader
+    // without touching the cache.
+    if (!override_dir_.empty() && read_file(override_dir_ + "/" + hash + ".spv", out) && !out.empty()) {
+        NXLOG_I("nvn", "shader override: %s.spv from %s", hash.c_str(), override_dir_.c_str());
+        return true;
+    }
     if (pack_read(hash, out)) {
         pre_from_pack_.fetch_add(1, std::memory_order_relaxed);
         return true;
@@ -1173,8 +1179,10 @@ bool ShaderCache::open(const std::string& dir) {
     }
     resources_col_ = resources_col;
     dir_ = dir;
+    override_dir_ = nxrt::config_get_str("nvn", "shader_override", "");
     open_ = true;
     NXLOG_I("nvn", "shader cache %s: %zu records", dir.c_str(), lines_.size());
+    if (!override_dir_.empty()) NXLOG_I("nvn", "shader override: .spv files in %s replace the cache's", override_dir_.c_str());
     pack_open();
     start_preload();
     return true;
