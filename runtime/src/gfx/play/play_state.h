@@ -111,12 +111,13 @@ struct G {
     bool overlay_was_visible = false;
     float mouse_x = 0, mouse_y = 0;
     bool mouse1 = false;
-    // the touch screen (touch_route.h): the last finger event in window pixels, and on the picture (play_frame.cpp, each frame); for GameHost::touch_point
+    // the touch screen (touch_route.h): the last finger event in window pixels, for GameHost::touch_point, which maps it onto the picture when
+    // asked (touch_geo: the window and the picture, kept each frame by play_frame.cpp)
     float touch_x = 0, touch_y = 0;
     bool touch_seen = false, touch_down = false;
     uint64_t touch_ns = 0;
-    float touch_u = 0, touch_v = 0;
-    bool touch_inside = false;
+    mm::Geometry touch_geo;
+    bool touch_geo_set = false;
     bool finger_pointer = false;         // GameHost::set_finger_pointer: the free pointer's motion and left button are a finger (no capture in play)
     uint32_t jc2_buttons = 0;            // host mouse buttons as nn::hid::MouseButton bits, for the Joy-Con 2 mouse (hid jc2_mouse.h)
     float jc2_wheel_x = 0, jc2_wheel_y = 0;   // wheel notches since the last feed

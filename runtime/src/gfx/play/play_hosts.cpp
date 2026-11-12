@@ -38,10 +38,11 @@ public:
     const Settings& settings() const override { return g().settings; }
     bool touch_point(TouchPoint* out) const override {
         const G& st = g();
-        if (!st.touch_seen) return false;
-        out->u = st.touch_u;
-        out->v = st.touch_v;
-        out->inside = st.touch_inside;
+        if (!st.touch_seen || !st.touch_geo_set) return false;
+        // Mapped here rather than once a frame: the game's part of the frame (GamePlay::frame) runs before play mode's own, so a finger that
+        // has just landed was read at the spot of the previous one, and with the free pointer (which moves before it presses) the target
+        // stayed there.
+        mm::window_to_picture(st.touch_geo, st.touch_x, st.touch_y, &out->u, &out->v, &out->inside);
         out->down = st.touch_down;
         const uint64_t now = now_ns();
         out->age_ns = now > st.touch_ns ? now - st.touch_ns : 0;
