@@ -561,10 +561,12 @@ void shift_shape(uint64_t ch, uint64_t pos, const char* what, aim_debug::Use use
         else how = "left as the game's";
     } else if (past_bands(r.y - base, true) || a.src == Source::Touch) {
         // past the bands, and for every touched block: the shape goes to the block's column and row (its band is 0, hook_pitch), so a
-        // touch breaks as high as it places instead of where the game's band guess put the swing
+        // touch breaks as high as it places instead of where the game's band guess put the swing. A touch's shape goes one row lower: in
+        // play (11-12) it hit the block above the touched one, and a lone block not at all (its upper row was the empty one above).
         const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
+        const int drop = a.src == Source::Touch ? 2 : 1;
         wr<float>(pos, px + static_cast<float>(r.x - cx) * 100.f);
-        wr<float>(pos + 4, rd<float>(pos + 4) + static_cast<float>(r.y - 1 - base) * 100.f);
+        wr<float>(pos + 4, rd<float>(pos + 4) + static_cast<float>(r.y - drop - base) * 100.f);
         wr<float>(pos + 8, pz + static_cast<float>(r.z - cz) * 100.f);
         how = a.src == Source::Touch ? "moved to the touched column and row" : "moved to the hit column and row";
         log_reach(what, cx, cz, r);
