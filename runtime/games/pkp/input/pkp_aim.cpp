@@ -150,7 +150,8 @@ struct State {
     struct TouchCell {
         uint64_t gen = ~0ull;
         bool hit = false;
-        int x = 0, y = 0, z = 0;
+        int x = 0, y = 0, z = 0;      // the block the finger sees
+        int qx = 0, qy = 0, qz = 0;   // the target query's cell: through a side face, the block under the cell in front of that face (the game builds on top of its target)
     } touch_cell;
     uint64_t logged_cell = 0;
 };
@@ -171,7 +172,8 @@ struct Aim {
     int reach = kReach;    // cells from the character's column within which the ray walk accepts a hit
     int extra = 0;         // the extra cells of reach the column and row hooks move to (1 + extra cells)
     bool fixed = false;    // touch: the target is this cell (resolved when the finger landed), not the ray
-    int cx = 0, cy = 0, cz = 0;
+    int cx = 0, cy = 0, cz = 0;      // the touched block (the swing tools break it)
+    int qx = 0, qy = 0, qz = 0;      // the target query's cell (placing: the game builds on top of it)
 };
 
 // The follow camera of the local player's character ch while it is the active one, else 0.
@@ -186,22 +188,33 @@ uint64_t follow_camera(uint64_t ch) {
     return cm + kFollow;
 }
 
-// True when cell (x, y, z) holds a block that is solid for the tool rays.
-bool solid_cell(int x, int y, int z) {
-    if (x < 0 || x > 2047 || z < 0 || z > 2047 || y < 0 || y > 127) return false;
+// The block id of cell (x, y, z) (0: air or out of the world) and its collision meta (bit 0 = solid for the tool rays).
+uint16_t cell_block(int x, int y, int z, uint16_t* meta = nullptr) {
+    if (meta) *meta = 0;
+    if (x < 0 || x > 2047 || z < 0 || z > 2047 || y < 0 || y > 127) return 0;
     const uint64_t world = rd<uint64_t>(g.base + kWorld);
-    if (!world) return false;
+    if (!world) return 0;
     const uint64_t map = rd<uint64_t>(world + 0x6000030), cells = rd<uint64_t>(world + 0x6000018);
-    if (!map || !cells) return false;
+    if (!map || !cells) return 0;
     const uint16_t chunk = rd<uint16_t>(map + static_cast<uint64_t>((x >> 5) + (z >> 5) * 64) * 2);
-    if (chunk >= 256) return false;
+    if (chunk >= 256) return 0;
     const uint16_t id = rd<uint16_t>(cells + chunk * 0x60000ull + static_cast<uint64_t>((x & 31) | ((z & 31) << 5) | (y << 10)) * 3) & 0x7ff;
-    return id != 0 && (rd<uint16_t>(g.base + kCollisionMeta + 2ull * id) & 1);
+    if (id && meta) *meta = rd<uint16_t>(g.base + kCollisionMeta + 2ull * id);
+    return id;
 }
+
+// True when cell (x, y, z) holds a block that is solid for the tool rays (camera aim's rule: what the tools can hit).
+bool solid_cell(int x, int y, int z) {
+    uint16_t meta = 0;
+    return cell_block(x, y, z, &meta) != 0 && (meta & 1);
+}
+
+// True when cell (x, y, z) holds any block (touch aim's rule: what the finger sees).
+bool block_cell(int x, int y, int z) { return cell_block(x, y, z) != 0; }
 
 int feet_row(uint64_t ch) { return static_cast<int>(std::floor((rd<float>(ch + kPosition + 4) + 0.2f) / 100.f)); }
 
-struct RayHit { int x = 0, y = 0, z = 0, h = 0; };  // h: cells from the character's column
+struct RayHit { int x = 0, y = 0, z = 0, h = 0; int bx = 0, by = 0, bz = 0; };  // h: cells from the character's column; b*: the cell the ray was in just before the hit (the touched face)
 
 // The camera's ray: through the crosshair, the view's centre. With the over-the-shoulder camera (pkp_view_offset.h) the view is moved off
 // the follow camera's eye and look-at by an offset, so the ray starts there and runs parallel (zero offset: the follow camera's own eye).
@@ -277,7 +290,7 @@ bool touch_ray_of(float tu, float tv, Ray& out) {
     return std::isfinite(out.dx) && std::isfinite(out.dy) && std::isfinite(out.dz);
 }
 
-bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record = true);
+bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record = true, bool any_block = false);
 
 // The ray the hooks aim with for character ch: the finger's while a touch target is live (touch aim), else the camera's (camera aim), else
 // none (the game's own targeting). Both need the local player's follow camera to be the active one (follow_camera: not in the game's own
@@ -296,20 +309,38 @@ Aim aim_for(uint64_t ch) {
         }
         if (live) {
             const int reach = std::max(kReach, g.touch_reach);
-            if (gen != g.touch_cell.gen) {   // a new touch (the finger landed or moved): the cell its ray hits, once
-                RayHit r;
-                const bool hit = touch_ray_of(tu, tv, a.ray) && walk_ray(a.ray, ch, r, reach, true);
-                g.touch_cell = {gen, hit, r.x, r.y, r.z};
-                if (g.logged_cell < 8) {
+            if (gen != g.touch_cell.gen) {   // a new touch (the finger landed or moved): the first block its ray meets, once (what the finger sees)
+                RayHit r, rs;
+                const bool ray_ok = touch_ray_of(tu, tv, a.ray);
+                const bool hit = ray_ok && walk_ray(a.ray, ch, r, reach, true, true);
+                const bool hit_solid = ray_ok && walk_ray(a.ray, ch, rs, reach, false, false);   // camera aim's rule, for the log
+                // The game places on top of the query's target cell. Through a top face that is the touched block itself; through a side
+                // face the player means the spot in front of that face, so the query gets the block under the cell in front (the game then
+                // stacks onto it), when there is one.
+                int qx = r.x, qy = r.y, qz = r.z;
+                if (hit && r.by == r.y && block_cell(r.bx, r.by - 1, r.bz)) qx = r.bx, qy = r.by - 1, qz = r.bz;
+                g.touch_cell = {gen, hit, r.x, r.y, r.z, qx, qy, qz};
+                if (g.logged_cell < 64) {
                     g.logged_cell++;
-                    if (hit) NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> cell %d,%d,%d (%d cells out)", static_cast<double>(tu), static_cast<double>(tv), r.x, r.y, r.z, r.h);
-                    else NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> nothing within %d cells", static_cast<double>(tu), static_cast<double>(tv), reach);
+                    if (hit) {
+                        uint16_t meta = 0;
+                        const uint16_t id = cell_block(r.x, r.y, r.z, &meta);
+                        NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> cell %d,%d,%d (%d cells out, feet row %d, block %u meta 0x%x), through its %s face from %d,%d,%d%s",
+                                static_cast<double>(tu), static_cast<double>(tv), r.x, r.y, r.z, r.h, feet_row(ch), id, meta, r.by > r.y ? "top" : r.by < r.y ? "bottom" : "side", r.bx, r.by, r.bz,
+                                !hit_solid ? "; no tool-solid cell on the ray" : (rs.x != r.x || rs.y != r.y || rs.z != r.z) ? "; the tool-solid cell differs" : "");
+                        if (hit_solid && (rs.x != r.x || rs.y != r.y || rs.z != r.z))
+                            NXLOG_I(kTag, "touch aim:   tool-solid cell on that ray: %d,%d,%d (%d cells out)", rs.x, rs.y, rs.z, rs.h);
+                        if (qx != r.x || qy != r.y || qz != r.z) NXLOG_I(kTag, "touch aim:   placing targets %d,%d,%d (the block under the cell in front of the touched face)", qx, qy, qz);
+                    } else {
+                        NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> nothing within %d cells", static_cast<double>(tu), static_cast<double>(tv), reach);
+                    }
                 }
             }
             if (g.touch_cell.hit) {
                 a.src = Source::Touch;
                 a.fixed = true;
                 a.cx = g.touch_cell.x, a.cy = g.touch_cell.y, a.cz = g.touch_cell.z;
+                a.qx = g.touch_cell.qx, a.qy = g.touch_cell.qy, a.qz = g.touch_cell.qz;
                 a.reach = reach;
                 a.extra = std::max(0, g.touch_reach - 1);
                 return a;
@@ -329,7 +360,7 @@ Aim aim_for(uint64_t ch) {
 // Walk the cell grid along the ray from its origin; the first solid cell within reach cells of the character's column is the hit.
 // Cells before the ray gets near the character are skipped; past the kReach box only cells in front of the character count. record: the
 // walk is reported to the debug view (not for the nearby-object interaction).
-bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record) {
+bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record, bool any_block) {
     const float ex = ray.ox, ey = ray.oy, ez = ray.oz;
     const float dx = ray.dx, dy = ray.dy, dz = ray.dz;
     const float px = rd<float>(ch + kPosition), pz = rd<float>(ch + kPosition + 8);
@@ -351,7 +382,9 @@ bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record) {
     }
     using aim_debug::Step;
     bool near = false;
+    int bx = x, by = y, bz = z;   // the cell before the current one
     for (int n = 0; n < 128; n++) {
+        bx = x, by = y, bz = z;
         if (tx <= ty && tx <= tz) { x += sx; tx += tdx; }
         else if (ty <= tz) { y += sy; ty += tdy; }
         else { z += sz; tz += tdz; }
@@ -366,8 +399,8 @@ bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record) {
             if (dbg) aim_debug::ray_step(x, y, z, Step::Behind);
             continue;
         }
-        if (solid_cell(x, y, z)) {
-            r = {x, y, z, h};
+        if (any_block ? block_cell(x, y, z) : solid_cell(x, y, z)) {
+            r = {x, y, z, h, bx, by, bz};
             if (dbg) aim_debug::ray_hit(x, y, z, h);
             return true;
         }
@@ -378,12 +411,14 @@ bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record) {
 
 // The cell the aim targets for character ch: a touch's fixed cell (its distance from the character's column measured now, so walking away
 // takes it out of reach), else the first solid cell the ray hits (walk_ray).
-bool aim_walk(const Aim& a, uint64_t ch, RayHit& r, int reach, bool record = true) {
+// query: the target query's cell (placing), else the touched block (the swing tools).
+bool aim_walk(const Aim& a, uint64_t ch, RayHit& r, int reach, bool record = true, bool query = true) {
     if (!a.fixed) return walk_ray(a.ray, ch, r, reach, record);
     const float px = rd<float>(ch + kPosition), pz = rd<float>(ch + kPosition + 8);
     if (!std::isfinite(px) || !std::isfinite(pz)) return false;
     const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
-    r = {a.cx, a.cy, a.cz, std::max(std::abs(a.cx - cx), std::abs(a.cz - cz))};
+    const int x = query ? a.qx : a.cx, y = query ? a.qy : a.cy, z = query ? a.qz : a.cz;
+    r = {x, y, z, std::max(std::abs(x - cx), std::abs(z - cz))};
     return r.h <= reach;
 }
 
@@ -391,13 +426,13 @@ bool aim_walk(const Aim& a, uint64_t ch, RayHit& r, int reach, bool record = tru
 // active one, or neither mod live). Camera: the camera's yaw, or the direction to a floor cell the ray hits beside the character. Touch:
 // the direction to the touched cell; a finger on nothing within reach leaves the game's own heading. interaction: the nearby-object
 // interaction's query keeps the old box (kReach) and is not reported to the debug view.
-bool aim_yaw(uint64_t ch, float& yaw, bool interaction = false) {
+bool aim_yaw(uint64_t ch, float& yaw, bool interaction = false, bool query = true) {
     const Aim a = aim_for(ch);
     if (a.src == Source::None) return false;
     if (!(a.ray.dx * a.ray.dx + a.ray.dz * a.ray.dz > 1e-6f)) return false;
     yaw = std::atan2(a.ray.dx, a.ray.dz);
     RayHit r;
-    const bool hit = aim_walk(a, ch, r, interaction ? kReach : a.reach, !interaction);
+    const bool hit = aim_walk(a, ch, r, interaction ? kReach : a.reach, !interaction, query);
     const bool to_cell = a.src == Source::Touch ? hit && r.h > 0 : hit && r.h > 0 && r.y < feet_row(ch);
     if (a.src == Source::Touch && !to_cell) return false;
     if (to_cell) {
@@ -407,9 +442,9 @@ bool aim_yaw(uint64_t ch, float& yaw, bool interaction = false) {
     return std::isfinite(yaw);
 }
 
-void replace(::Ctx* c, unsigned reg, uint64_t ch, const char* what, bool interaction = false) {
+void replace(::Ctx* c, unsigned reg, uint64_t ch, const char* what, bool interaction = false, bool query = true) {
     float yaw;
-    if (!aim_yaw(ch, yaw, interaction)) return;
+    if (!aim_yaw(ch, yaw, interaction, query)) return;
     if (g.logged < 8) {
         g.logged++;
         NXLOG_I(kTag, "camera aim: %s heading %.3f -> camera yaw %.3f", what, static_cast<double>(c->v[reg].f[0]), static_cast<double>(yaw));
@@ -424,8 +459,8 @@ int hook_heading(::Ctx* c, uint64_t, void*) {
     replace(c, 0, c->x[28], "query", interaction(c->x[29]));
     return 0;
 }
-int hook_swing_preview(::Ctx* c, uint64_t, void*) { replace(c, 9, c->x[22], "swing preview"); return 0; }
-int hook_swing_live(::Ctx* c, uint64_t, void*) { replace(c, 8, c->x[19], "swing hit"); return 0; }
+int hook_swing_preview(::Ctx* c, uint64_t, void*) { replace(c, 9, c->x[22], "swing preview", false, false); return 0; }
+int hook_swing_live(::Ctx* c, uint64_t, void*) { replace(c, 8, c->x[19], "swing hit", false, false); return 0; }
 
 // The row the swing shapes apply the band offset to: the feet row plus the step count when the step flag is set.
 int swing_base_row(uint64_t ch) {
@@ -445,7 +480,7 @@ bool past_bands(int d, bool swing) { return swing ? d < -1 || d > 3 : d < -1 || 
 
 bool aim_hit(uint64_t ch, int base, bool swing, RayHit& r, Aim& a, aim_debug::Use use) {
     a = aim_for(ch);
-    const bool hit = a.src != Source::None && aim_walk(a, ch, r, a.reach);
+    const bool hit = a.src != Source::None && aim_walk(a, ch, r, a.reach, true, !swing);
     const int d = r.y - base, lo = rows_down(a.extra), hi = rows_up(swing, a.extra);
     const char* reject = !a.cam                      ? "follow camera not active"
                          : a.src == Source::None     ? "no aim (camera aim off, no touch)"
@@ -566,7 +601,7 @@ int hook_pitch(::Ctx* c, uint64_t, void*) {
     const aim_debug::Use use = ret == kQueryRowReturn ? aim_debug::Use::Query : ret == kSwingPreviewReturn ? aim_debug::Use::SwingPreview
                                : ret == kSwingLiveReturn ? aim_debug::Use::SwingHit : aim_debug::Use::Other;
     RayHit r;
-    const bool hit = aim_walk(a, ch, r, ia ? kReach : a.reach, !ia);
+    const bool hit = aim_walk(a, ch, r, ia ? kReach : a.reach, !ia, !swing);
     const int d = r.y - base;
     // A swing's shape spans the band's row and the one above, and the game keeps only the upper one when it holds a block (0x7100409160):
     // ask for the row below the hit. The band of the lowest row keeps the floor in front when the row above it is empty.
