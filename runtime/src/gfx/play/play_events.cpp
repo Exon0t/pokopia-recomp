@@ -88,8 +88,13 @@ void handle_event(const input::Event& e, uint64_t now) {
     }
     if (st.overlay && st.overlay->handle_event(e)) return;
     const bool menu_blocked = st.overlay && st.overlay->blocks_game();
-    // a finger is not the keyboard and mouse: the prompts stay as they are (touch_route.h)
-    const MouseRoute touch_route = route_mouse(e.type == EventType::MouseButtonDown || e.type == EventType::MouseButtonUp || e.type == EventType::MouseMotion ? e.flags : 0);
+    // a finger is not the keyboard and mouse: the prompts stay as they are (touch_route.h). A finger is SDL's touch mouse event, or, when a
+    // game asked for it (GameHost::set_finger_pointer: touch screens that arrive as a plain mouse), the free pointer's motion and left button.
+    const bool mouse_ev = e.type == EventType::MouseButtonDown || e.type == EventType::MouseButtonUp || e.type == EventType::MouseMotion;
+    const bool finger = mouse_ev && (is_touch_event(e.flags) ||
+                                     (st.finger_pointer && !platform::relative_mouse() &&
+                                      (e.type == EventType::MouseMotion ? !(e.flags & input::kFlagRelative) : e.u.button.button == 1)));
+    const MouseRoute touch_route = route_mouse(finger ? input::kFlagTouch : 0);
     if ((e.type == EventType::KeyDown && !(e.flags & input::kFlagRepeat)) || (e.type == EventType::MouseButtonDown && touch_route.sets_last_device) || e.type == EventType::MouseWheel)
         st.last_dev = LastDevice::KeyboardMouse;
     switch (e.type) {
@@ -112,7 +117,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             break;
         case EventType::MouseButtonDown:
             if (e.u.button.button == 1) st.mouse1 = true;
-            if (is_touch_event(e.flags) && e.u.button.button == 1) {   // a finger came down (touch_route.h)
+            if (finger && e.u.button.button == 1) {   // a finger came down (touch_route.h)
                 st.touch_x = e.u.button.x;
                 st.touch_y = e.u.button.y;
                 st.touch_down = st.touch_seen = true;
@@ -126,7 +131,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             break;
         case EventType::MouseButtonUp:
             if (e.u.button.button == 1) st.mouse1 = false;
-            if (is_touch_event(e.flags) && e.u.button.button == 1 && st.touch_down) {   // the finger lifted
+            if (finger && e.u.button.button == 1 && st.touch_down) {   // the finger lifted
                 st.touch_down = false;
                 st.touch_ns = now;
             }
@@ -158,7 +163,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             if (!(e.flags & input::kFlagRelative)) {
                 st.mouse_x = e.u.motion.x;
                 st.mouse_y = e.u.motion.y;
-                if (is_touch_event(e.flags)) {   // the finger moved
+                if (finger) {   // the finger moved
                     st.touch_x = e.u.motion.x;
                     st.touch_y = e.u.motion.y;
                     st.touch_seen = true;

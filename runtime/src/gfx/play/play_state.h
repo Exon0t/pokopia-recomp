@@ -117,6 +117,7 @@ struct G {
     uint64_t touch_ns = 0;
     float touch_u = 0, touch_v = 0;
     bool touch_inside = false;
+    bool finger_pointer = false;         // GameHost::set_finger_pointer: the free pointer's motion and left button are a finger (no capture in play)
     uint32_t jc2_buttons = 0;            // host mouse buttons as nn::hid::MouseButton bits, for the Joy-Con 2 mouse (hid jc2_mouse.h)
     float jc2_wheel_x = 0, jc2_wheel_y = 0;   // wheel notches since the last feed
     uint64_t last_status_ns = 0;

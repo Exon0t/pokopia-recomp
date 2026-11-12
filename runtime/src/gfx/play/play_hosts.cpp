@@ -47,6 +47,7 @@ public:
         out->age_ns = now > st.touch_ns ? now - st.touch_ns : 0;
         return true;
     }
+    void set_finger_pointer(bool on) override { g().finger_pointer = on; }
     bool action_active(Act a, uint64_t now_ns) const override { return g().engine && g().engine->act_active(a, now_ns); }
     uint64_t action_activations(Act a) const override { return g().engine ? g().engine->activations(a) : 0; }
     void right_stick(float* x, float* y) const override {

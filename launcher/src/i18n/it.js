@@ -346,6 +346,8 @@ export default {
   'Touch the screen to aim: abilities and tools target the block under your finger, then stay on it for a moment so you can press the button. The sticks and buttons stay as they are.': 'Tocca lo schermo per mirare: abilità e strumenti puntano al blocco sotto il dito e vi restano un momento, così puoi premere il pulsante. Levette e pulsanti restano come sono.',
   'Reach in blocks': 'Portata in blocchi',
   'Target stays (seconds)': 'Il bersaglio resta (secondi)',
+  'Finger from the pointer': 'Dito dal puntatore',
+  'On': 'Attivo',
   'Sort button in the bag and containers': 'Pulsante di ordinamento nello zaino e nei contenitori',
   'Sort each time the bag opens': 'Ordina ogni volta che si apre lo zaino',
   'Search in the crafting screen': 'Ricerca nella schermata di creazione',

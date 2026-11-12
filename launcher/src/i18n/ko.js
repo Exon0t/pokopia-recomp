@@ -346,6 +346,8 @@ export default {
   'Touch the screen to aim: abilities and tools target the block under your finger, then stay on it for a moment so you can press the button. The sticks and buttons stay as they are.': '화면을 터치해 조준합니다. 기술과 도구는 손가락 아래의 블록을 조준하고, 버튼을 누를 수 있도록 잠시 그 자리에 머무릅니다. 스틱과 버튼은 그대로입니다.',
   'Reach in blocks': '사거리(블록)',
   'Target stays (seconds)': '조준 유지(초)',
+  'Finger from the pointer': '포인터를 손가락으로',
+  'On': '켜기',
   'Sort button in the bag and containers': '가방과 보관함의 정렬 버튼',
   'Sort each time the bag opens': '가방을 열 때마다 정렬',
   'Search in the crafting screen': '제작 화면에서 검색',
