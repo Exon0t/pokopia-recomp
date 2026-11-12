@@ -59,6 +59,7 @@ enum class Key : uint8_t {
     TouchAim,
     TouchAimReach,
     TouchAimHold,
+    TouchAimPointer,
     InventorySort,
     InventoryAutosort,
     CraftSearch,

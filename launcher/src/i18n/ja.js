@@ -346,6 +346,8 @@ export default {
   'Touch the screen to aim: abilities and tools target the block under your finger, then stay on it for a moment so you can press the button. The sticks and buttons stay as they are.': '画面をタッチして狙います。わざや道具は指の下のブロックを狙い、ボタンを押せるようしばらくそのままになります。スティックとボタンはそのままです。',
   'Reach in blocks': '射程（ブロック）',
   'Target stays (seconds)': '狙いの保持（秒）',
+  'Finger from the pointer': 'ポインターを指とみなす',
+  'On': 'オン',
   'Sort button in the bag and containers': 'バッグとコンテナの整理ボタン',
   'Sort each time the bag opens': 'バッグを開くたびに整理',
   'Search in the crafting screen': 'クラフト画面での検索',

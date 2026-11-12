@@ -75,8 +75,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 #include "nxrt/hooks.h"
+#include "nxrt/host_device.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
 
@@ -605,6 +607,11 @@ void install(const FeatureInstall& in) {
     g.touch_reach = static_cast<int>(std::clamp<int64_t>(settings::get_int(settings::Key::TouchAimReach), 1, 8));
     const double hold = std::clamp(settings::get_double(settings::Key::TouchAimHold), 0.0, 10.0);
     g.touch_hold_ns = static_cast<uint64_t>(hold * 1e9);
+    // Where the finger comes from: SDL's touch events always; on a handheld (or touch_aim_pointer = on) the plain pointer too, since
+    // SteamOS's game mode hands a touch to the window as a mouse. Play mode then leaves the pointer free in play (GameHost::set_finger_pointer).
+    const std::string pm = settings::get_str(settings::Key::TouchAimPointer);
+    const bool finger_pointer = g.touch_on && (pm == "on" || (pm != "off" && host_is_handheld()));
+    if (g.host) g.host->set_finger_pointer(finger_pointer);
     if (!g.cam_on && !g.touch_on) {
         NXLOG_I(kTag, "camera aim: off; touch aim: off");
         return;
@@ -626,8 +633,8 @@ void install(const FeatureInstall& in) {
     else
         NXLOG_I(kTag, "camera aim: off (the hooks serve touch aim)");
     if (g.touch_on)
-        NXLOG_I(kTag, "touch aim: on, reach %d cells, hold %.1f s after the finger lifts (the finger aims through the render view, the buttons act)",
-                g.touch_reach, hold);
+        NXLOG_I(kTag, "touch aim: on, reach %d cells, hold %.1f s after the finger lifts, the finger is %s (the finger aims through the render view, the buttons act)",
+                g.touch_reach, hold, finger_pointer ? "the touch events and the free pointer (touch_aim_pointer = on, or auto on a handheld)" : "the touch events");
     else
         NXLOG_I(kTag, "touch aim: off");
 }

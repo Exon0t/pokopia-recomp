@@ -38,6 +38,10 @@ public:
     virtual ~GameHost() = default;
     virtual const Settings& settings() const = 0;                 // the settings in force
     virtual bool touch_point(TouchPoint*) const { return false; }   // the last touch on the screen; false until a finger has touched it
+    // The free pointer's motion and left button count as the finger too (touch_point, and no left-click action in play), and play mode
+    // does not capture the pointer for the camera: for touch screens the window gets as a plain mouse (SteamOS game mode: gamescope turns a
+    // touch into pointer events, so SDL marks nothing as touch).
+    virtual void set_finger_pointer(bool) {}
     virtual bool action_active(Act a, uint64_t now_ns) const = 0;  // a binding of the action is held
     // The right stick as the game gets it (dead zone, invert and sensitivity applied), -1..1, + = right and up.
     // Activation edges of the action since start (a binding of it became active: a press, a tap, a wheel notch). A game-side toggle counts these.
