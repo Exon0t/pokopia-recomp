@@ -559,12 +559,14 @@ void shift_shape(uint64_t ch, uint64_t pos, const char* what, aim_debug::Use use
         // a finger on nothing within reach leaves the game's own shape; the camera turns it to its yaw
         if (a.src == Source::Camera) turn_shape(ch, pos, px, pz, a), how = "turned to the camera";
         else how = "left as the game's";
-    } else if (past_bands(r.y - base, true)) {
+    } else if (past_bands(r.y - base, true) || a.src == Source::Touch) {
+        // past the bands, and for every touched block: the shape goes to the block's column and row (its band is 0, hook_pitch), so a
+        // touch breaks as high as it places instead of where the game's band guess put the swing
         const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
         wr<float>(pos, px + static_cast<float>(r.x - cx) * 100.f);
         wr<float>(pos + 4, rd<float>(pos + 4) + static_cast<float>(r.y - 1 - base) * 100.f);
         wr<float>(pos + 8, pz + static_cast<float>(r.z - cz) * 100.f);
-        how = "moved to the hit column and row";
+        how = a.src == Source::Touch ? "moved to the touched column and row" : "moved to the hit column and row";
         log_reach(what, cx, cz, r);
     } else if (const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
                cx == r.x && cz == r.z) {
@@ -621,6 +623,8 @@ int hook_pitch(::Ctx* c, uint64_t, void*) {
     else if (r.h == 0) pitch = t0 - 0.01f, band = aim_debug::kUnder, why = "down extreme: the cell under the character";
     else if (!ia && r.h <= 1 + a.extra && past_bands(d, swing) && d >= rows_down(a.extra) && d <= rows_up(swing, a.extra))
         pitch = (t1 + t2) * 0.5f, band = 0, why = "past the bands: band 0, the row moved to the hit";
+    else if (!ia && swing && a.src == Source::Touch && r.h <= 1 + a.extra && d >= rows_down(a.extra) && d <= rows_up(swing, a.extra))
+        pitch = (t1 + t2) * 0.5f, band = 0, why = "touch: band 0, the swing moved to the touched block's row";
     else if (band == -1) pitch = (t0 + t1) * 0.5f, why = "band -1";
     else if (band == 0) pitch = (t1 + t2) * 0.5f, why = "band 0";
     else if (band == 1) pitch = (t2 + t3) * 0.5f, why = "band +1";
