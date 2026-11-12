@@ -151,9 +151,10 @@ struct State {
         uint64_t gen = ~0ull;
         bool hit = false;
         int x = 0, y = 0, z = 0;      // the block the finger sees
-        int qx = 0, qy = 0, qz = 0;   // the target query's cell: through a side face, the block under the cell in front of that face (the game builds on top of its target)
+        int qx = 0, qy = 0, qz = 0;   // the target query's cell: the empty cell outside the touched face (the game places into an empty target that touches a block)
     } touch_cell;
     uint64_t logged_cell = 0;
+    uint64_t logged_query = 0;
 };
 State g;
 
@@ -173,7 +174,7 @@ struct Aim {
     int extra = 0;         // the extra cells of reach the column and row hooks move to (1 + extra cells)
     bool fixed = false;    // touch: the target is this cell (resolved when the finger landed), not the ray
     int cx = 0, cy = 0, cz = 0;      // the touched block (the swing tools break it)
-    int qx = 0, qy = 0, qz = 0;      // the target query's cell (placing: the game builds on top of it)
+    int qx = 0, qy = 0, qz = 0;      // the target query's cell (placing: the empty cell outside the touched face)
 };
 
 // The follow camera of the local player's character ch while it is the active one, else 0.
@@ -314,11 +315,12 @@ Aim aim_for(uint64_t ch) {
                 const bool ray_ok = touch_ray_of(tu, tv, a.ray);
                 const bool hit = ray_ok && walk_ray(a.ray, ch, r, reach, true, true);
                 const bool hit_solid = ray_ok && walk_ray(a.ray, ch, rs, reach, false, false);   // camera aim's rule, for the log
-                // The game places on top of the query's target cell. Through a top face that is the touched block itself; through a side
-                // face the player means the spot in front of that face, so the query gets the block under the cell in front (the game then
-                // stacks onto it), when there is one.
-                int qx = r.x, qy = r.y, qz = r.z;
-                if (hit && r.by == r.y && block_cell(r.bx, r.by - 1, r.bz)) qx = r.bx, qy = r.by - 1, qz = r.bz;
+                // The query's target is the empty cell the ray was in just before the block (the touched face's outside): on top of a floor,
+                // in front of a wall at the touched height, under an overhang. The game places into an empty target that touches a block
+                // (looking up at a wall with the stick builds one up the same way) and stacks on a solid one, so this gives the spot the
+                // finger means; a wall light hangs on the block behind it. A rule that gave the first block below the face was tried and
+                // taken out: it put every wall touch on the floor.
+                const int qx = r.bx, qy = r.by, qz = r.bz;
                 g.touch_cell = {gen, hit, r.x, r.y, r.z, qx, qy, qz};
                 if (g.logged_cell < 64) {
                     g.logged_cell++;
@@ -330,7 +332,7 @@ Aim aim_for(uint64_t ch) {
                                 !hit_solid ? "; no tool-solid cell on the ray" : (rs.x != r.x || rs.y != r.y || rs.z != r.z) ? "; the tool-solid cell differs" : "");
                         if (hit_solid && (rs.x != r.x || rs.y != r.y || rs.z != r.z))
                             NXLOG_I(kTag, "touch aim:   tool-solid cell on that ray: %d,%d,%d (%d cells out)", rs.x, rs.y, rs.z, rs.h);
-                        if (qx != r.x || qy != r.y || qz != r.z) NXLOG_I(kTag, "touch aim:   placing targets %d,%d,%d (the block under the cell in front of the touched face)", qx, qy, qz);
+                        NXLOG_I(kTag, "touch aim:   placing targets %d,%d,%d (the empty cell outside the touched face)", qx, qy, qz);
                     } else {
                         NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> nothing within %d cells", static_cast<double>(tu), static_cast<double>(tv), reach);
                     }
@@ -516,6 +518,11 @@ int hook_query_base(::Ctx* c, uint64_t, void*) {
     const int oy = rd<int16_t>(fp - 0xb6);
     const int ny = move && past_bands(r.y - feet, false) ? r.y : oy;
     if (aim_debug::on()) aim_debug::query_start(ox, oy, oz, move ? r.x : ox, ny, move ? r.z : oz);
+    if (a.src == Source::Touch && g.logged_query < 64) {   // touch aim: what the query gets, for the first touches (placing lands on top of the start cell's column)
+        g.logged_query++;
+        NXLOG_I(kTag, "touch aim: query start cell %d,%d,%d -> %s%d,%d,%d (aim cell %d,%d,%d, %d cells out, feet %d, %s)", ox, oy, oz, move ? "" : "kept ", move ? r.x : ox, ny,
+                move ? r.z : oz, a.qx, a.qy, a.qz, r.h, feet, move ? "moved" : "the hook's range rejected it");
+    }
     if (!move) return 0;
     if (ny != oy) wr<int16_t>(fp - 0xb6, static_cast<int16_t>(ny));
     wr<int16_t>(fp - 0xb8, static_cast<int16_t>(r.x));
