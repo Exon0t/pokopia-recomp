@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Gameplay mods
-- Added **touch aim** for touch screens (Steam Deck, Legion Go and other handhelds, touch laptops): touch a block and your abilities and tools target it, the game's own highlight shows where, and the target stays a moment after the finger lifts so you can press the button. A tap fires nothing; the sticks and buttons keep the game's own targeting. On by default: `touch_aim`, with `touch_aim_reach` (blocks from your character, 4), `touch_aim_hold` (seconds, 2.5) and `touch_aim_pointer` (the pointer counts as the finger: auto on a handheld) under `[pkp]`, in the game's Settings > Mouse and the launcher's Settings > Gameplay
+- Added **touch aim** for touch screens (Steam Deck, Legion Go and other handhelds, touch laptops): touch a block and your abilities and tools target it, the game's own highlight shows where, and the target stays on that block for a moment after the finger lifts so you can press the button (a broken block leaves the target on the gap, so you can place into it). A tap fires nothing; the sticks and buttons keep the game's own targeting. On by default: `touch_aim`, with `touch_aim_reach` (blocks from your character, 4), `touch_aim_hold` (seconds, 2.5) and `touch_aim_pointer` (the pointer counts as the finger: auto on a handheld) under `[pkp]`, in the game's Settings > Mouse and the launcher's Settings > Gameplay
 
 ## 0.11.0 (build O: Ocelot)
 
