@@ -7,7 +7,9 @@
 // finger touches the screen, and get it back when the hold runs out. The same hooks serve both: only the ray differs (aim_for below). The
 // finger comes from play mode (play_game.h GameHost::touch_point: SDL's touch mouse events), the eye and the picture's projection from
 // the render view the game built last (render/pkp_view_projection.h). A tap fires no button (play mode's touch_route.h): the finger aims,
-// the buttons act. The game's own target highlight is the feedback.
+// the buttons act. The game's own target highlight is the feedback. A touch picks a cell, not a ray: the ray is walked once when the finger
+// lands or moves, and the cell it hit stays the target while the touch is live, so a block that breaks leaves the target on the air where
+// it was (and a placement goes there) instead of sliding to the floor behind it.
 //
 // The game's command target query 0x71002e19a0 (x1 = the character; every ability, tool and item preview and action asks it which
 // cells are in front) reads the character's heading through the character's virtual +0x18 (the call returns at 0x71002e1a14 with s0 =
@@ -143,6 +145,14 @@ struct State {
     std::mutex touch_mu;
     bool touch_live = false;    // a finger is on the picture, or lifted within the hold
     float touch_u = 0, touch_v = 0;
+    uint64_t touch_gen = 0;     // counts up when a finger lands or moves: a new touch to resolve into a cell
+    // the cell the current touch resolved to (the game thread's hooks, aim_for): once per touch_gen
+    struct TouchCell {
+        uint64_t gen = ~0ull;
+        bool hit = false;
+        int x = 0, y = 0, z = 0;
+    } touch_cell;
+    uint64_t logged_cell = 0;
 };
 State g;
 
@@ -160,6 +170,8 @@ struct Aim {
     Ray ray;
     int reach = kReach;    // cells from the character's column within which the ray walk accepts a hit
     int extra = 0;         // the extra cells of reach the column and row hooks move to (1 + extra cells)
+    bool fixed = false;    // touch: the target is this cell (resolved when the finger landed), not the ray
+    int cx = 0, cy = 0, cz = 0;
 };
 
 // The follow camera of the local player's character ch while it is the active one, else 0.
@@ -265,6 +277,8 @@ bool touch_ray_of(float tu, float tv, Ray& out) {
     return std::isfinite(out.dx) && std::isfinite(out.dy) && std::isfinite(out.dz);
 }
 
+bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record = true);
+
 // The ray the hooks aim with for character ch: the finger's while a touch target is live (touch aim), else the camera's (camera aim), else
 // none (the game's own targeting). Both need the local player's follow camera to be the active one (follow_camera: not in the game's own
 // mouse mode either).
@@ -275,15 +289,32 @@ Aim aim_for(uint64_t ch) {
     if (g.touch_on) {
         bool live = false;
         float tu = 0, tv = 0;
+        uint64_t gen = 0;
         {
             std::lock_guard<std::mutex> lk(g.touch_mu);
-            live = g.touch_live, tu = g.touch_u, tv = g.touch_v;
+            live = g.touch_live, tu = g.touch_u, tv = g.touch_v, gen = g.touch_gen;
         }
-        if (live && touch_ray_of(tu, tv, a.ray)) {
-            a.src = Source::Touch;
-            a.reach = std::max(kReach, g.touch_reach);
-            a.extra = std::max(0, g.touch_reach - 1);
-            return a;
+        if (live) {
+            const int reach = std::max(kReach, g.touch_reach);
+            if (gen != g.touch_cell.gen) {   // a new touch (the finger landed or moved): the cell its ray hits, once
+                RayHit r;
+                const bool hit = touch_ray_of(tu, tv, a.ray) && walk_ray(a.ray, ch, r, reach, true);
+                g.touch_cell = {gen, hit, r.x, r.y, r.z};
+                if (g.logged_cell < 8) {
+                    g.logged_cell++;
+                    if (hit) NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> cell %d,%d,%d (%d cells out)", static_cast<double>(tu), static_cast<double>(tv), r.x, r.y, r.z, r.h);
+                    else NXLOG_I(kTag, "touch aim: touch at %.3f, %.3f -> nothing within %d cells", static_cast<double>(tu), static_cast<double>(tv), reach);
+                }
+            }
+            if (g.touch_cell.hit) {
+                a.src = Source::Touch;
+                a.fixed = true;
+                a.cx = g.touch_cell.x, a.cy = g.touch_cell.y, a.cz = g.touch_cell.z;
+                a.reach = reach;
+                a.extra = std::max(0, g.touch_reach - 1);
+                return a;
+            }
+            // a finger on nothing within reach: camera aim (if on) or the game's own targeting
         }
     }
     if (g.cam_on) {
@@ -298,7 +329,7 @@ Aim aim_for(uint64_t ch) {
 // Walk the cell grid along the ray from its origin; the first solid cell within reach cells of the character's column is the hit.
 // Cells before the ray gets near the character are skipped; past the kReach box only cells in front of the character count. record: the
 // walk is reported to the debug view (not for the nearby-object interaction).
-bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record = true) {
+bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record) {
     const float ex = ray.ox, ey = ray.oy, ez = ray.oz;
     const float dx = ray.dx, dy = ray.dy, dz = ray.dz;
     const float px = rd<float>(ch + kPosition), pz = rd<float>(ch + kPosition + 8);
@@ -345,6 +376,17 @@ bool walk_ray(const Ray& ray, uint64_t ch, RayHit& r, int reach, bool record = t
     return false;
 }
 
+// The cell the aim targets for character ch: a touch's fixed cell (its distance from the character's column measured now, so walking away
+// takes it out of reach), else the first solid cell the ray hits (walk_ray).
+bool aim_walk(const Aim& a, uint64_t ch, RayHit& r, int reach, bool record = true) {
+    if (!a.fixed) return walk_ray(a.ray, ch, r, reach, record);
+    const float px = rd<float>(ch + kPosition), pz = rd<float>(ch + kPosition + 8);
+    if (!std::isfinite(px) || !std::isfinite(pz)) return false;
+    const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
+    r = {a.cx, a.cy, a.cz, std::max(std::abs(a.cx - cx), std::abs(a.cz - cz))};
+    return r.h <= reach;
+}
+
 // The heading the aim gives the local player's character ch, or false when nothing aims (not the local player, the follow camera not the
 // active one, or neither mod live). Camera: the camera's yaw, or the direction to a floor cell the ray hits beside the character. Touch:
 // the direction to the touched cell; a finger on nothing within reach leaves the game's own heading. interaction: the nearby-object
@@ -355,7 +397,7 @@ bool aim_yaw(uint64_t ch, float& yaw, bool interaction = false) {
     if (!(a.ray.dx * a.ray.dx + a.ray.dz * a.ray.dz > 1e-6f)) return false;
     yaw = std::atan2(a.ray.dx, a.ray.dz);
     RayHit r;
-    const bool hit = walk_ray(a.ray, ch, r, interaction ? kReach : a.reach, !interaction);
+    const bool hit = aim_walk(a, ch, r, interaction ? kReach : a.reach, !interaction);
     const bool to_cell = a.src == Source::Touch ? hit && r.h > 0 : hit && r.h > 0 && r.y < feet_row(ch);
     if (a.src == Source::Touch && !to_cell) return false;
     if (to_cell) {
@@ -403,7 +445,7 @@ bool past_bands(int d, bool swing) { return swing ? d < -1 || d > 3 : d < -1 || 
 
 bool aim_hit(uint64_t ch, int base, bool swing, RayHit& r, Aim& a, aim_debug::Use use) {
     a = aim_for(ch);
-    const bool hit = a.src != Source::None && walk_ray(a.ray, ch, r, a.reach);
+    const bool hit = a.src != Source::None && aim_walk(a, ch, r, a.reach);
     const int d = r.y - base, lo = rows_down(a.extra), hi = rows_up(swing, a.extra);
     const char* reject = !a.cam                      ? "follow camera not active"
                          : a.src == Source::None     ? "no aim (camera aim off, no touch)"
@@ -524,7 +566,7 @@ int hook_pitch(::Ctx* c, uint64_t, void*) {
     const aim_debug::Use use = ret == kQueryRowReturn ? aim_debug::Use::Query : ret == kSwingPreviewReturn ? aim_debug::Use::SwingPreview
                                : ret == kSwingLiveReturn ? aim_debug::Use::SwingHit : aim_debug::Use::Other;
     RayHit r;
-    const bool hit = walk_ray(a.ray, ch, r, ia ? kReach : a.reach, !ia);
+    const bool hit = aim_walk(a, ch, r, ia ? kReach : a.reach, !ia);
     const int d = r.y - base;
     // A swing's shape spans the band's row and the one above, and the game keeps only the upper one when it holds a block (0x7100409160):
     // ask for the row below the hit. The band of the lowest row keeps the floor in front when the row above it is empty.
@@ -586,6 +628,8 @@ void frame(bool in_game, double, play::GameFrame*) {
     {
         std::lock_guard<std::mutex> lk(g.touch_mu);
         changed = live != g.touch_live;
+        // a new touch: the finger landed (the target was not live, or the finger is down again at another spot) or moved while down
+        if (live && (!g.touch_live || (tp.down && (std::fabs(u - g.touch_u) > 0.002f || std::fabs(v - g.touch_v) > 0.002f)))) g.touch_gen++;
         g.touch_live = live;
         if (live) g.touch_u = u, g.touch_v = v;
     }
