@@ -110,6 +110,7 @@ struct G {
     std::atomic<uint64_t> last_pi_frame{0};       // value of `frames` at the last ProcessInput (the game is playing while it keeps being called)
     bool overlay_was_visible = false;
     float mouse_x = 0, mouse_y = 0;
+    bool mouse_known = false;            // an absolute motion has set mouse_x/y
     bool mouse1 = false;
     // the touch screen (touch_route.h): the last finger event in window pixels, and on the picture (play_frame.cpp, each frame); for GameHost::touch_point
     float touch_x = 0, touch_y = 0;

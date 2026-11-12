@@ -161,9 +161,14 @@ void handle_event(const input::Event& e, uint64_t now) {
         }
         case EventType::MouseMotion:
             if (!(e.flags & input::kFlagRelative)) {
+                // A motion to the spot the pointer already has is not a finger: Wine or gamescope sends one now and then with nothing touched
+                // (the Legion Go S logged one about every 50 s at the resting cursor), and as a touch it pulled the aim back to the last
+                // touched spot for the hold. The first one only tells where the pointer rests; a finger that lands there comes with its press.
+                const bool moved = st.mouse_known && (e.u.motion.x != st.mouse_x || e.u.motion.y != st.mouse_y);
+                st.mouse_known = true;
                 st.mouse_x = e.u.motion.x;
                 st.mouse_y = e.u.motion.y;
-                if (finger) {   // the finger moved
+                if (finger && moved) {   // the finger moved
                     st.touch_x = e.u.motion.x;
                     st.touch_y = e.u.motion.y;
                     st.touch_seen = true;
