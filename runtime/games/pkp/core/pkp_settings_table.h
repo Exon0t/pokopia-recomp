@@ -95,6 +95,8 @@ inline constexpr Spec kSpecs[] = {
     gameplay(b(TouchAim, "touch_aim", true, "Touch the screen to aim: abilities and tools target the block under the finger, with the sticks and buttons as they are.")),
     under(TouchAim, i(TouchAimReach, "touch_aim_reach", 4, 1, 8, "With touch_aim: how many blocks from the character a touched block may be.")),
     under(TouchAim, d(TouchAimHold, "touch_aim_hold", 2.5, 0.0, 10.0, "With touch_aim: seconds the target stays on the touched block after the finger lifts (0: only while touching).")),
+    under(TouchAim, s(TouchAimPointer, "touch_aim_pointer", "auto", "auto on off",
+                      "With touch_aim: the mouse pointer counts as the finger in play and is not captured for the camera (auto: on a handheld, whose touch screen arrives as a mouse).")),
     gameplay(b(InventorySort, "inventory_sort", true, "A Sort button in the bag's and the container screens' key guide.")),
     under(InventorySort, b(InventoryAutosort, "inventory_autosort", false, "Sort the bag each time the bag or a container screen opens.")),
     opt_in(gameplay(b(CraftSearch, "craft_search", false, "A Search button in the crafting screen's key guide."))),

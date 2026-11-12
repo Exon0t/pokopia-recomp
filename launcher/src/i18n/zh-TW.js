@@ -346,6 +346,8 @@ export default {
   'Touch the screen to aim: abilities and tools target the block under your finger, then stay on it for a moment so you can press the button. The sticks and buttons stay as they are.': '觸控螢幕來瞄準：技能和工具會瞄準手指下方的方塊，並短暫停留以便你按下按鈕。搖桿和按鍵保持不變。',
   'Reach in blocks': '範圍（方塊）',
   'Target stays (seconds)': '目標保持（秒）',
+  'Finger from the pointer': '將指標視為手指',
+  'On': '開',
   'Sort button in the bag and containers': '背包和容器中的整理按鈕',
   'Sort each time the bag opens': '每次開啟背包時整理',
   'Search in the crafting screen': '製作畫面中的搜尋',

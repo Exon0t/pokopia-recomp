@@ -346,6 +346,8 @@ export default {
   'Touch the screen to aim: abilities and tools target the block under your finger, then stay on it for a moment so you can press the button. The sticks and buttons stay as they are.': 'Tippe auf den Bildschirm, um zu zielen: Fähigkeiten und Werkzeuge zielen auf den Block unter deinem Finger und bleiben kurz darauf, damit du die Taste drücken kannst. Sticks und Tasten bleiben wie sie sind.',
   'Reach in blocks': 'Reichweite in Blöcken',
   'Target stays (seconds)': 'Ziel bleibt (Sekunden)',
+  'Finger from the pointer': 'Finger aus dem Mauszeiger',
+  'On': 'An',
   'Sort button in the bag and containers': 'Sortieren-Schaltfläche in der Tasche und in Behältern',
   'Sort each time the bag opens': 'Bei jedem Öffnen der Tasche sortieren',
   'Search in the crafting screen': 'Suche im Handwerksbildschirm',

@@ -309,6 +309,7 @@ const GAMEPLAY = {
   },
   touch_aim_reach: { label: t('Reach in blocks'), options: (k) => Array.from({ length: k.max - k.min + 1 }, (_, n) => n + k.min).map((n) => ({ value: String(n), label: num(n) })) },
   touch_aim_hold: { label: t('Target stays (seconds)'), options: (k) => Array.from({ length: Math.round((k.max - k.min) / 0.5) + 1 }, (_, n) => k.min + n * 0.5).map((n) => ({ value: String(n), label: n === 0 ? t('Off') : num(n) })) },
+  touch_aim_pointer: { label: t('Finger from the pointer'), options: () => [{ value: 'auto', label: t('Automatic') }, { value: 'on', label: t('On') }, { value: 'off', label: t('Off') }] },
   inventory_sort: { label: t('Sort button in the bag and containers') },
   inventory_autosort: { label: t('Sort each time the bag opens') },
   craft_search: { label: t('Search in the crafting screen') },
