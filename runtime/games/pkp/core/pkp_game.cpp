@@ -83,7 +83,7 @@ constexpr Entry kEntries[] = {
     port(&kTaaProbeFeature),
 #endif
     port(&kShoulderCameraFeature),
-    mod(&kJumpFeature, JumpMomentum), mod(&kAimFeature, CameraAim), port(&kAimDebugFeature), mod(&kTitleFeature, TitleQuit), mod(&kSortFeature, InventorySort),
+    mod(&kJumpFeature, JumpMomentum), mod(&kAimFeature, CameraAim, TouchAim), port(&kAimDebugFeature), mod(&kTitleFeature, TitleQuit), mod(&kSortFeature, InventorySort),
     mod(&kCraftFeature, CraftSearch), mod(&kPokemonCapFeature, PokemonCap), port(&key_guide::kKeyGuideFeature),
     port(&kOptionsFeature),
 };

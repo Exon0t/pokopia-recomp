@@ -170,6 +170,11 @@ const Row kMouse[] = {
     choice("Invert Horizontal", "Moving the mouse left looks right.", kOffOn, 2, ROW_BOOL(mouse.invert_x)),
     choice("Mouse Pointer in Menus", "Use the mouse as a pointer: hover, click, right click, wheel.", kOffOn, 2, ROW_BOOL(mouse.menu_cursor)),
     names("Button Icons", "The button icons in prompts. Automatic follows the last device used.", kPromptNames, static_cast<uint8_t>(std::size(kPromptNames)), ROW_ENUM(prompts.style, play::PromptStyle)),
+    // Touch aim (pkp_aim.cpp): a gameplay mod, labelled as in the launcher's Settings > Gameplay; its rows sit here because the Gameplay tab is
+    // full (kDirtySlot rows) and a touch screen is a pointing device like the mouse.
+    key_row("Touch Aim", "Touch the screen to aim: abilities and tools target the block under your finger, the game's own highlight shows it, and the sticks and buttons stay as they are.", settings::Key::TouchAim),
+    key_row("Touch Aim Reach", "With touch aim: how many blocks away from your character a touched block may be.", settings::Key::TouchAimReach, 1, "%.0f"),
+    key_row("Touch Aim Hold", "With touch aim: how long the target stays on the touched block after your finger lifts, so you can press the button. Off aims only while touching.", settings::Key::TouchAimHold, 0.5, "%.1f s", 1, "Off"),
     dynamic("Mouse Mode Key", "Turns the Joy-Con 2 mouse mode on and off (point and click to place and break). To change it, press left or right on this row (or click it), then press the new key or mouse button. Esc cancels.",
             mouse_mode_text, mouse_mode_max, [](const S&) { return kMmMid; }, [](S&, int) {}),
 };
