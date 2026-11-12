@@ -560,10 +560,11 @@ void shift_shape(uint64_t ch, uint64_t pos, const char* what, aim_debug::Use use
         if (a.src == Source::Camera) turn_shape(ch, pos, px, pz, a), how = "turned to the camera";
         else how = "left as the game's";
     } else if (past_bands(r.y - base, true) || a.src == Source::Touch) {
-        // past the bands, and for every touched block: the shape goes to the block's column and row (its band is 0, hook_pitch), so a
-        // touch breaks as high as it places instead of where the game's band guess put the swing. The shape's lower row goes to the one
-        // under the hit, so its upper row (the one the game breaks when it holds a block) is the hit. Measured from the shape's own row,
-        // not the base row: a band-0 swing does not always start at the base (on the PC bench a floor touch's started 2 rows lower).
+        // past the bands, and for every touched block: the shape goes to the block's column and row (hook_pitch asks for band 0 past
+        // the bands, else the band under the touched row), so a touch breaks as high as it places instead of where the game's band guess
+        // put the swing. The shape's lower row goes to the one under the hit, so its upper row (the one the game breaks when it holds a
+        // block) is the hit. Measured from the shape's own row, not the base row: a band-0 swing does not always start at the base (on
+        // the PC bench a floor touch's started 2 rows lower).
         const float py = rd<float>(pos + 4);
         const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
         const int cy = static_cast<int>(std::floor(py / 100.f));
@@ -618,8 +619,11 @@ int hook_pitch(::Ctx* c, uint64_t, void*) {
     const int d = r.y - base;
     // A swing's shape spans the band's row and the one above, and the game keeps only the upper one when it holds a block (0x7100409160):
     // ask for the row below the hit. The band of the lowest row keeps the floor in front when the row above it is empty.
+    // The band picks the row even where shift_shape moved the shape: on the PC bench a band-0 swing moved to rows 34-35 (feet 33) broke
+    // the block at 34 under a touched 35 first, the touched one only on the next swing. So a touch asks for the band under its row too.
     int band = swing ? std::max(d - 1, -1) : d;
     const float t0 = c->v[0].f[0], t1 = c->v[3].f[0], t2 = c->v[1].f[0], t3 = c->v[2].f[0], t4 = c->v[4].f[0];
+    const auto band_pitch = [&](int b) { return b == -1 ? (t0 + t1) * 0.5f : b == 0 ? (t1 + t2) * 0.5f : b == 1 ? (t2 + t3) * 0.5f : t4 > t3 ? (t3 + t4) * 0.5f : t3; };
     float pitch = NAN;                               // not finite: the game's own band stays
     const char* why = "row outside the bands: the game's band";
     if (!hit) why = "nothing near: the game's band";
@@ -628,7 +632,7 @@ int hook_pitch(::Ctx* c, uint64_t, void*) {
     else if (!ia && r.h <= 1 + a.extra && past_bands(d, swing) && d >= rows_down(a.extra) && d <= rows_up(swing, a.extra))
         pitch = (t1 + t2) * 0.5f, band = 0, why = "past the bands: band 0, the row moved to the hit";
     else if (!ia && swing && a.src == Source::Touch && r.h <= 1 + a.extra && d >= rows_down(a.extra) && d <= rows_up(swing, a.extra))
-        pitch = (t1 + t2) * 0.5f, band = 0, why = "touch: band 0, the swing moved to the touched block's row";
+        band = std::clamp(d - 1, -1, 2), pitch = band_pitch(band), why = "touch: the band under the touched row, the swing moved to its row";
     else if (band == -1) pitch = (t0 + t1) * 0.5f, why = "band -1";
     else if (band == 0) pitch = (t1 + t2) * 0.5f, why = "band 0";
     else if (band == 1) pitch = (t2 + t3) * 0.5f, why = "band +1";
