@@ -303,6 +303,12 @@ const GAMEPLAY = {
     after: [{ id: 'camera_aim_note', type: 'note', when: isOn('camera_aim'), note: () => ({ text: t('Abilities and tools aim where the camera looks instead of where your character faces, and your character turns to the target when the ability starts.') }) }],
   },
   camera_aim_reach: { label: t('Extra reach in blocks'), options: (k) => Array.from({ length: k.max - k.min + 1 }, (_, n) => n + k.min).map((n) => ({ value: String(n), label: n === 0 ? t('Off') : num(n) })) },
+  touch_aim: {
+    label: t('Touch aim'),
+    after: [{ id: 'touch_aim_note', type: 'note', when: isOn('touch_aim'), note: () => ({ text: t('Touch the screen to aim: abilities and tools target the block under your finger, then stay on it for a moment so you can press the button. The sticks and buttons stay as they are.') }) }],
+  },
+  touch_aim_reach: { label: t('Reach in blocks'), options: (k) => Array.from({ length: k.max - k.min + 1 }, (_, n) => n + k.min).map((n) => ({ value: String(n), label: num(n) })) },
+  touch_aim_hold: { label: t('Target stays (seconds)'), options: (k) => Array.from({ length: Math.round((k.max - k.min) / 0.5) + 1 }, (_, n) => k.min + n * 0.5).map((n) => ({ value: String(n), label: n === 0 ? t('Off') : num(n) })) },
   inventory_sort: { label: t('Sort button in the bag and containers') },
   inventory_autosort: { label: t('Sort each time the bag opens') },
   craft_search: { label: t('Search in the crafting screen') },

@@ -415,6 +415,9 @@ Pokopia's own keys, in the `[pkp]` section of the game ini (`pkp.ini`; `nxrt.ini
 | `pkp` | `camera_aim` | `1` | `1` `0` | `NXRT_PKP_CAMERA_AIM` | Abilities and tools aim where the camera looks instead of where the character faces. Next start. |
 | `pkp` | `camera_aim_reach` | `0` | `0` to `4` (clamped into it) | `NXRT_PKP_CAMERA_AIM_REACH` | With camera_aim: extra cells of reach (0: the game's own range). Next start. |
 | `pkp` | `camera_aim_debug` | `0` | `1` `0` | `NXRT_PKP_CAMERA_AIM_DEBUG` | Draw camera aim's ray, the cells it tested and the cell it picked (debugging). |
+| `pkp` | `touch_aim` | `1` | `1` `0` | `NXRT_PKP_TOUCH_AIM` | Touch the screen to aim: abilities and tools target the block under the finger, with the sticks and buttons as they are. Next start. |
+| `pkp` | `touch_aim_reach` | `4` | `1` to `8` (clamped into it) | `NXRT_PKP_TOUCH_AIM_REACH` | With touch_aim: how many blocks from the character a touched block may be. Next start. |
+| `pkp` | `touch_aim_hold` | `2.5` | `0` to `10` (clamped into it) | `NXRT_PKP_TOUCH_AIM_HOLD` | With touch_aim: seconds the target stays on the touched block after the finger lifts (0: only while touching). Next start. |
 | `pkp` | `inventory_sort` | `1` | `1` `0` | `NXRT_PKP_INVENTORY_SORT` | A Sort button in the bag's and the container screens' key guide. Next start. |
 | `pkp` | `inventory_autosort` | `0` | `1` `0` | `NXRT_PKP_INVENTORY_AUTOSORT` | Sort the bag each time the bag or a container screen opens. Next start. |
 | `pkp` | `craft_search` | `0` | `1` `0` | `NXRT_PKP_CRAFT_SEARCH` | A Search button in the crafting screen's key guide. Next start. |

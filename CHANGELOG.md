@@ -9,6 +9,9 @@
 - Fixed **Set up** on Linux stopping with "extract_corpus.py was not found": the launcher looked for the shader extractor in `tools/` while the Linux package ships it in `tools/shaders/`. Update only: no shader rebuild, no Set up again
 - Fixed a black screen on GPUs that cannot share memory with the game directly (such as the Qualcomm Adreno X1-85 in Snapdragon X laptops): the game's graphics memory now goes through copies there, as it already does on Linux (#589). Update only: no shader rebuild, no Set up again
 
+### Gameplay mods
+- Added **touch aim** for touch screens (Steam Deck, Legion Go and other handhelds, touch laptops): touch a block and your abilities and tools target it, the game's own highlight shows where, and the target stays a moment after the finger lifts so you can press the button. A tap fires nothing; the sticks and buttons keep the game's own targeting. On by default: `touch_aim`, with `touch_aim_reach` (blocks from your character, 4) and `touch_aim_hold` (seconds, 2.5) under `[pkp]`, in the game's Settings > Mouse and the launcher's Settings > Gameplay
+
 ### Mods
 - Added a **Mods** tab to the game's own Settings: pick a mod, switch it on or off (applies at the next start), see its state and change its settings, which reach the mod at once
 - Mods can now take screenshots (without the game's overlay menus in them) and react to keyboard keys
