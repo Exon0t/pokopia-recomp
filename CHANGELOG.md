@@ -6,6 +6,9 @@
 - New **Aspect Ratio** setting in the game's Settings > Display and in the launcher (Auto, 16:9, 16:10, 21:9, 32:9; applies after a restart): 16:9 now keeps the game in 16:9 on a 16:10 or ultrawide screen. The toggle that only chose black bars over stretching is now called **Letterbox** (#564). Update only: no shader rebuild, no Set up again
 - Fixed the **Nearest** upscaler with **Scene Resolution** below 100% leaving the 3D scene smooth and blurry, the same as Off: the scene is now enlarged with hard pixels while the menus and HUD stay sharp (#571). Update only: no shader rebuild, no Set up again
 
+### Gameplay mods
+- Added **touch aim** for touch screens (Steam Deck, Legion Go and other handhelds, touch laptops): touch a block and your abilities and tools target it, the game's own highlight shows where, and the target stays a moment after the finger lifts so you can press the button. A tap fires nothing; the sticks and buttons keep the game's own targeting. On by default: `touch_aim`, with `touch_aim_reach` (blocks from your character, 4) and `touch_aim_hold` (seconds, 2.5) under `[pkp]`, in the game's Settings > Mouse and the launcher's Settings > Gameplay
+
 ### Mods
 - Added a **Mods** tab to the game's own Settings: pick a mod, switch it on or off (applies at the next start), see its state and change its settings, which reach the mod at once
 - Mods can now take screenshots (without the game's overlay menus in them) and react to keyboard keys

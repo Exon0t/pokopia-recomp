@@ -260,6 +260,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
         const bool game_cursor = playing && !overlay_visible && hid::jc2_mouse_active();
         if (st.window && !platform::relative_mouse())
             platform::set_cursor_visible(!game_cursor && (overlay_visible || !(ptr.enabled() && menu_up) || ptr.cursor_visible(menu_up)));
+        if (st.touch_seen) mm::window_to_picture(geo, st.touch_x, st.touch_y, &st.touch_u, &st.touch_v, &st.touch_inside);   // GameHost::touch_point
         if (st.window) {   // the Joy-Con 2 mouse (hid): the pointer on the picture, the buttons and the wheel
             hid::HostMouse hm;
             bool inside = false;

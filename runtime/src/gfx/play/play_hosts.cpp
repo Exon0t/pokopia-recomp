@@ -36,6 +36,17 @@ void quit_prompt_request() {
 class GameHostImpl : public GameHost {
 public:
     const Settings& settings() const override { return g().settings; }
+    bool touch_point(TouchPoint* out) const override {
+        const G& st = g();
+        if (!st.touch_seen) return false;
+        out->u = st.touch_u;
+        out->v = st.touch_v;
+        out->inside = st.touch_inside;
+        out->down = st.touch_down;
+        const uint64_t now = now_ns();
+        out->age_ns = now > st.touch_ns ? now - st.touch_ns : 0;
+        return true;
+    }
     bool action_active(Act a, uint64_t now_ns) const override { return g().engine && g().engine->act_active(a, now_ns); }
     uint64_t action_activations(Act a) const override { return g().engine ? g().engine->activations(a) : 0; }
     void right_stick(float* x, float* y) const override {

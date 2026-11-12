@@ -112,6 +112,12 @@ void handle_event(const input::Event& e, uint64_t now) {
             break;
         case EventType::MouseButtonDown:
             if (e.u.button.button == 1) st.mouse1 = true;
+            if (is_touch_event(e.flags) && e.u.button.button == 1) {   // a finger came down (touch_route.h)
+                st.touch_x = e.u.button.x;
+                st.touch_y = e.u.button.y;
+                st.touch_down = st.touch_seen = true;
+                st.touch_ns = now;
+            }
             st.jc2_buttons |= jc2_button_bit(e.u.button.button);
             if (!menu_blocked) mm::pointer().on_button(e.u.button.button, true);
             // While the Joy-Con 2 mouse owns the mouse in play, the left and right buttons belong to the device alone (the middle button stays
@@ -120,6 +126,10 @@ void handle_event(const input::Event& e, uint64_t now) {
             break;
         case EventType::MouseButtonUp:
             if (e.u.button.button == 1) st.mouse1 = false;
+            if (is_touch_event(e.flags) && e.u.button.button == 1 && st.touch_down) {   // the finger lifted
+                st.touch_down = false;
+                st.touch_ns = now;
+            }
             st.jc2_buttons &= ~jc2_button_bit(e.u.button.button);
             mm::pointer().on_button(e.u.button.button, false);
             if (touch_route.game_click) st.engine->mouse_button(e.u.button.button, false, now);   // a finger's press never reached the engine, so neither does its release
@@ -148,6 +158,12 @@ void handle_event(const input::Event& e, uint64_t now) {
             if (!(e.flags & input::kFlagRelative)) {
                 st.mouse_x = e.u.motion.x;
                 st.mouse_y = e.u.motion.y;
+                if (is_touch_event(e.flags)) {   // the finger moved
+                    st.touch_x = e.u.motion.x;
+                    st.touch_y = e.u.motion.y;
+                    st.touch_seen = true;
+                    st.touch_ns = now;
+                }
                 if (!menu_blocked) mm::pointer().on_motion(e.u.motion.x, e.u.motion.y);
                 // moving the pointer over a menu counts as using the mouse (the prompts switch to keyboard icons); the raw motion of the aim in play does not
                 if (!menu_blocked && st.settings.mouse.menu_cursor && mm::pointer().has_moved() && touch_route.sets_last_device) st.last_dev = LastDevice::KeyboardMouse;
@@ -158,6 +174,7 @@ void handle_event(const input::Event& e, uint64_t now) {
             st.engine->release_all(now);
             key_state::clear();
             st.mouse1 = false;
+            st.touch_down = false;
             st.jc2_buttons = 0;
             mm::pointer().on_focus_lost();
             break;

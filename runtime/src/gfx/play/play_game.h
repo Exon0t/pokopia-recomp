@@ -22,11 +22,22 @@
 
 namespace nxrt::play {
 
+// A finger on the touch screen, for a game's touch aiming: SDL turns a touch into mouse events marked input::kFlagTouch (touch_route.h), and
+// play mode keeps the last one. u, v: where it touched the game picture, 0..1 (v down), clamped; inside: it was on the picture (not a bar);
+// down: a finger is on the screen now; age_ns: since the last touch event (a press, a move or the lift).
+struct TouchPoint {
+    float u = 0, v = 0;
+    bool inside = false;
+    bool down = false;
+    uint64_t age_ns = 0;
+};
+
 // What play mode offers the game module. Main thread (the thread the game's frame update and input hooks run on) unless noted.
 class GameHost {
 public:
     virtual ~GameHost() = default;
     virtual const Settings& settings() const = 0;                 // the settings in force
+    virtual bool touch_point(TouchPoint*) const { return false; }   // the last touch on the screen; false until a finger has touched it
     virtual bool action_active(Act a, uint64_t now_ns) const = 0;  // a binding of the action is held
     // The right stick as the game gets it (dead zone, invert and sensitivity applied), -1..1, + = right and up.
     // Activation edges of the action since start (a binding of it became active: a press, a tap, a wheel notch). A game-side toggle counts these.
