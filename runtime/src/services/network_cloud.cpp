@@ -645,6 +645,7 @@ int so_error(int fd) {
 namespace {
 
 constexpr uint64_t kSdkBase = 0x7500000000ull;
+constexpr uint64_t kMainBase = 0x7100000000ull;
 constexpr uint64_t kDispatchFiber = kSdkBase + 0x14f648;   // nn::os::detail::DispatchFiberContext
 constexpr uint64_t kFiberEntry = kSdkBase + 0x14ba10;      // where a new fiber starts (x0 = its FiberType)
 
@@ -757,6 +758,39 @@ void patch_fiber_dispatch() {
         VirtualProtect(at, sizeof code, old, &old);
         FlushInstructionCache(GetCurrentProcess(), at, sizeof code);
         NXLOG_I("net", "cloud: lifted DispatchFiberContext at %p redirected to the host fiber switch", static_cast<void*>(at));
+        // DEBUG: which function entries stored as words in main did the lifter not lift? (cloud_entries.txt: module offsets in hex)
+        if (FILE* f = std::fopen("cloud_entries.txt", "r")) {
+            FILE* o = std::fopen("cloud_entries_missing.txt", "w");
+            unsigned long long off = 0;
+            int total = 0, missing = 0;
+            while (std::fscanf(f, "%llx", &off) == 1) {
+                ++total;
+                if (!fn_lookup(kMainBase + off)) {
+                    ++missing;
+                    if (o) std::fprintf(o, "0x%llx\n", off);
+                }
+            }
+            std::fclose(f);
+            if (o) std::fclose(o);
+            NXLOG_I("net", "cloud: %d of %d stored function entries in main are not lifted (cloud_entries_missing.txt)", missing, total);
+        }
+        // main+0x1769584 (2.0.1a): a thread entry the game hands to the SDK when it travels to a cloud island. The lifter never saw
+        // it (it is only referenced as a function pointer), so the first call traps. It is five instructions; here it is as host code:
+        //   fn = [x0+0x1c0]; fn([x0+0x1c8]); if ([x0+0x1c0] != [main+0x34ae828]) main+0x17698f8(x0);
+        if (!fn_lookup(kMainBase + 0x1769584)) {
+            fn_register(kMainBase + 0x1769584, [](::Ctx* c) {
+                const uint64_t obj = c->x[0], lr = c->x[30];
+                auto rd = [](uint64_t a) { return *reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(a)); };
+                c->x[0] = rd(obj + 0x1c8);
+                call_indirect(c, rd(obj + 0x1c0));
+                if (rd(obj + 0x1c0) != rd(kMainBase + 0x34ae828)) {
+                    c->x[0] = obj;
+                    call_indirect(c, kMainBase + 0x17698f8);
+                }
+                c->x[30] = lr;
+            });
+            NXLOG_I("net", "cloud: main+0x1769584 (cloud island thread entry) answered on the host");
+        }
     });
 }
 
