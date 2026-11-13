@@ -564,12 +564,15 @@ void shift_shape(uint64_t ch, uint64_t pos, const char* what, aim_debug::Use use
         // the bands, else the band under the touched row), so a touch breaks as high as it places instead of where the game's band guess
         // put the swing. The shape's lower row goes to the one under the hit, so its upper row (the one the game breaks when it holds a
         // block) is the hit. Measured from the shape's own row, not the base row: a band-0 swing does not always start at the base (on
-        // the PC bench a floor touch's started 2 rows lower).
+        // the PC bench a floor touch's started 2 rows lower). A touch 3 or more rows up with nothing above the hit puts the lower row
+        // on the hit instead: the game's break row stops 2 above the base, so it would break the block under the hit first. Not with a
+        // block above: when its row is outside the shape the game breaks every block in it, so the one above would go too.
         const float py = rd<float>(pos + 4);
         const int cx = static_cast<int>(std::floor((px + 102400.f) / 100.f)), cz = static_cast<int>(std::floor((pz + 102400.f) / 100.f));
         const int cy = static_cast<int>(std::floor(py / 100.f));
         wr<float>(pos, px + static_cast<float>(r.x - cx) * 100.f);
-        wr<float>(pos + 4, py + static_cast<float>(r.y - 1 - cy) * 100.f);
+        const int lift = a.src == Source::Touch && r.y - base >= 3 && !block_cell(r.x, r.y + 1, r.z) ? 0 : 1;
+        wr<float>(pos + 4, py + static_cast<float>(r.y - lift - cy) * 100.f);
         wr<float>(pos + 8, pz + static_cast<float>(r.z - cz) * 100.f);
         how = a.src == Source::Touch ? "moved to the touched column and row" : "moved to the hit column and row";
         log_reach(what, cx, cz, r);
