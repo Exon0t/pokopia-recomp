@@ -21,6 +21,7 @@
 #include "coop.h"
 #include "ldn.h"
 #include "services_internal.h"
+#include "network_cloud.h"
 
 namespace nxrt::services::netsvc {
 
@@ -132,6 +133,12 @@ uint32_t bsd_poll(ipc::Request& req, ipc::Response& rsp) {
     coop_node* n = ldn_native_node();
     std::vector<coop_pollfd> fds(nfds <= 4096 ? nfds : 0);
     const uint64_t want = fds.size() * sizeof(coop_pollfd);
+    if (cloud::enabled() && !fds.empty() && buf_read(req.in_buf(0), fds.data(), want) == want &&
+        cloud::any_host_fd(reinterpret_cast<const cloud::PollFd*>(fds.data()), fds.size())) {
+        const vsock::Ret r = cloud::poll(reinterpret_cast<cloud::PollFd*>(fds.data()), fds.size(), timeout);
+        if (!r.err) buf_write(req.out_buf(0), fds.data(), want);
+        return bsd_ret(rsp, r);
+    }
     bool virt = n && !fds.empty() && buf_read(req.in_buf(0), fds.data(), want) == want;
     bool any = false;
     for (const coop_pollfd& p : fds) {
@@ -166,9 +173,23 @@ uint32_t bsd_select(ipc::Request& req, ipc::Response& rsp) {
             if (!virt || !coop_fd(fd)) virt = false;
         }
     }
-    if (!virt || !any) return bsd_ret(rsp, {-1, kBsdNetDown});
     int64_t ms = no_timeout ? -1 : sec * 1000 + usec / 1000;
     if (ms > 0x7fffffff) ms = 0x7fffffff;
+    if (cloud::enabled() && any) {
+        bool host = false;
+        for (int k = 0; k < 3 && !host; ++k)
+            for (int fd = cloud::kFdBase; fd < nfds && fd < 1024 && !host; ++fd)
+                if ((sets[k][fd >> 6] >> (fd & 63) & 1) && cloud::is_host_fd(fd)) host = true;
+        if (host) {
+            const vsock::Ret r = cloud::select(nfds, have[0] ? sets[0] : nullptr, have[1] ? sets[1] : nullptr, have[2] ? sets[2] : nullptr,
+                                               static_cast<int>(ms));
+            if (!r.err)
+                for (int k = 0; k < 3; ++k)
+                    if (have[k]) buf_write(req.out_buf(static_cast<size_t>(k)), sets[k], sizeof sets[k]);
+            return bsd_ret(rsp, r);
+        }
+    }
+    if (!virt || !any) return bsd_ret(rsp, {-1, kBsdNetDown});
     const vsock::Ret r = coop_r(coop_vnet_select(n, nfds, have[0] ? sets[0] : nullptr, have[1] ? sets[1] : nullptr,
                                                  have[2] ? sets[2] : nullptr, static_cast<int>(ms)));
     if (!r.err)
@@ -181,6 +202,7 @@ void add_bsd_udp(ipc::Service& s) {
     auto socket = [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         const int domain = req.arg<int32_t>(0), type = req.arg<int32_t>(4), proto = req.arg<int32_t>(8);
         coop_node* n = ldn_native_node();
+        if (cloud::enabled() && domain == vsock::kAfInet && (type & 0xFFFF) == vsock::kSockStream) return bsd_ret(rsp, cloud::socket(domain, type, proto));
         if (n && domain == kCoopFamily && (type & 0xFFFF) == kCoopDgram && coop_ldn_state(n) != COOP_LS_NONE)
             return bsd_ret(rsp, coop_r(coop_vnet_socket(n, domain, type, proto)));
         return bsd_ret(rsp, vsock::stack().socket(domain, type, proto));
@@ -188,10 +210,16 @@ void add_bsd_udp(ipc::Service& s) {
     cmd(s, "bsd", 2, "Socket", socket);
     cmd(s, "bsd", 3, "SocketExempt", socket);
     cmd(s, "bsd", 8, "Recv", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::recv(req.arg<int32_t>(0), buf_mut(req.out_buf(0)), static_cast<size_t>(req.out_buf(0).size), req.arg<int32_t>(4)));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) return coop_recv(rsp, n, req.arg<int32_t>(0), req.arg<int32_t>(4), req.out_buf(0), nullptr);
         return bsd_recv(rsp, req.arg<int32_t>(0), req.arg<int32_t>(4), req.out_buf(0), nullptr);
     });
     cmd(s, "bsd", 9, "RecvFrom", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) {
+            bsd_ret(rsp, cloud::recv(req.arg<int32_t>(0), buf_mut(req.out_buf(0)), static_cast<size_t>(req.out_buf(0).size), req.arg<int32_t>(4)));
+            rsp.push(uint32_t{0});
+            return 0;
+        }
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) {
             const ipc::Buffer from = req.out_buf(1);
             return coop_recv(rsp, n, req.arg<int32_t>(0), req.arg<int32_t>(4), req.out_buf(0), &from);
@@ -204,11 +232,13 @@ void add_bsd_udp(ipc::Service& s) {
         return 0;
     });
     cmd(s, "bsd", 10, "Send", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::send(req.arg<int32_t>(0), buf_ptr(req.in_buf(0)), static_cast<size_t>(req.in_buf(0).size), req.arg<int32_t>(4)));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) return coop_send(rsp, n, req.arg<int32_t>(0), req.arg<int32_t>(4), req.in_buf(0), nullptr);
         return bsd_send(rsp, req.arg<int32_t>(0), req.arg<int32_t>(4), req.in_buf(0), nullptr);
     });
     cmd(s, "bsd", 11, "SendTo", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         const int fd = req.arg<int32_t>(0);
+        if (cloud::is_host_fd(fd)) return bsd_ret(rsp, cloud::send(fd, buf_ptr(req.in_buf(0)), static_cast<size_t>(req.in_buf(0).size), req.arg<int32_t>(4)));
         if (coop_node* n = coop_fd(fd)) {
             const ipc::Buffer to = req.in_buf(1);
             return coop_send(rsp, n, fd, req.arg<int32_t>(4), req.in_buf(0), &to);
@@ -220,6 +250,11 @@ void add_bsd_udp(ipc::Service& s) {
     });
     cmd(s, "bsd", 13, "Bind", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         const int fd = req.arg<int32_t>(0);
+        if (cloud::is_host_fd(fd)) {
+            vsock::Addr ha;
+            if (const uint32_t e = read_sockaddr(req.in_buf(0), ha)) return bsd_ret(rsp, {-1, e});
+            return bsd_ret(rsp, cloud::bind(fd, ha));
+        }
         if (coop_node* n = coop_fd(fd)) {
             uint8_t sa[kSockaddrSize] = {};
             const uint32_t len = static_cast<uint32_t>(buf_read(req.in_buf(0), sa, sizeof sa));
@@ -233,6 +268,10 @@ void add_bsd_udp(ipc::Service& s) {
         const int fd = req.arg<int32_t>(0);
         vsock::Addr a;
         if (read_sockaddr(req.in_buf(0), a) == 0) ask_connect(a);
+        if (cloud::is_host_fd(fd)) {
+            if (const uint32_t e = read_sockaddr(req.in_buf(0), a)) return bsd_ret(rsp, {-1, e});
+            return bsd_ret(rsp, cloud::connect(fd, a));
+        }
         if (coop_fd(fd)) return bsd_ret(rsp, {-1, kBsdNetDown});
         if (const uint32_t e = read_sockaddr(req.in_buf(0), a)) return bsd_ret(rsp, addr_fail(fd, e));
         return bsd_ret(rsp, vsock::stack().connect(fd, a));
@@ -241,6 +280,12 @@ void add_bsd_udp(ipc::Service& s) {
         return [peer](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             vsock::Addr a;
             const int fd = req.arg<int32_t>(0);
+            if (cloud::is_host_fd(fd)) {
+                const vsock::Ret hr = peer ? cloud::getpeername(fd, &a) : cloud::getsockname(fd, &a);
+                bsd_ret(rsp, hr);
+                rsp.push(hr.err ? uint32_t{0} : write_sockaddr(req.out_buf(0), a));
+                return 0;
+            }
             if (coop_node* n = coop_fd(fd)) {
                 if (peer) {
                     bsd_ret(rsp, {-1, kBsdNetDown});
@@ -264,6 +309,13 @@ void add_bsd_udp(ipc::Service& s) {
     cmd(s, "bsd", 16, "GetSockName", name(false));
     cmd(s, "bsd", 17, "GetSockOpt", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         const ipc::Buffer out = req.out_buf(0);
+        if (cloud::is_host_fd(req.arg<int32_t>(0))) {
+            size_t hn = static_cast<size_t>(out.size);
+            const vsock::Ret hr = cloud::getsockopt(req.arg<int32_t>(0), req.arg<int32_t>(4), req.arg<int32_t>(8), buf_mut(out), &hn);
+            bsd_ret(rsp, hr);
+            rsp.push(hr.err ? uint32_t{0} : static_cast<uint32_t>(hn));
+            return 0;
+        }
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) {
             std::vector<uint8_t> v(static_cast<size_t>(out.size < 256 ? out.size : 256));
             uint32_t len = static_cast<uint32_t>(v.size());
@@ -280,6 +332,7 @@ void add_bsd_udp(ipc::Service& s) {
         return 0;
     });
     cmd(s, "bsd", 20, "Fcntl", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::fcntl(req.arg<int32_t>(0), req.arg<int32_t>(4), req.arg<int32_t>(8)));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) {
             const int c = req.arg<int32_t>(4);
             int v = req.arg<int32_t>(8);
@@ -292,6 +345,8 @@ void add_bsd_udp(ipc::Service& s) {
     });
     cmd(s, "bsd", 21, "SetSockOpt", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
         const ipc::Buffer in = req.in_buf(0);
+        if (cloud::is_host_fd(req.arg<int32_t>(0)))
+            return bsd_ret(rsp, cloud::setsockopt(req.arg<int32_t>(0), req.arg<int32_t>(4), req.arg<int32_t>(8), buf_ptr(in), static_cast<size_t>(in.addr ? in.size : 0)));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0)))
             return bsd_ret(rsp, coop_r(coop_vnet_setsockopt(n, req.arg<int32_t>(0), req.arg<int32_t>(4), req.arg<int32_t>(8), buf_ptr(in),
                                                             static_cast<uint32_t>(in.addr ? in.size : 0))));
@@ -299,18 +354,22 @@ void add_bsd_udp(ipc::Service& s) {
                                                       static_cast<size_t>(in.size)));
     });
     cmd(s, "bsd", 22, "Shutdown", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::shutdown(req.arg<int32_t>(0), req.arg<int32_t>(4)));
         if (coop_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, {-1, kBsdNetDown});
         return bsd_ret(rsp, vsock::stack().shutdown(req.arg<int32_t>(0), req.arg<int32_t>(4)));
     });
     cmd(s, "bsd", 24, "Write", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::send(req.arg<int32_t>(0), buf_ptr(req.in_buf(0)), static_cast<size_t>(req.in_buf(0).size), 0));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) return coop_send(rsp, n, req.arg<int32_t>(0), 0, req.in_buf(0), nullptr);
         return bsd_send(rsp, req.arg<int32_t>(0), 0, req.in_buf(0), nullptr);
     });
     cmd(s, "bsd", 25, "Read", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::recv(req.arg<int32_t>(0), buf_mut(req.out_buf(0)), static_cast<size_t>(req.out_buf(0).size), 0));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) return coop_recv(rsp, n, req.arg<int32_t>(0), 0, req.out_buf(0), nullptr);
         return bsd_recv(rsp, req.arg<int32_t>(0), 0, req.out_buf(0), nullptr);
     });
     cmd(s, "bsd", 26, "Close", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+    if (cloud::is_host_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, cloud::close(req.arg<int32_t>(0)));
         if (coop_node* n = coop_fd(req.arg<int32_t>(0))) return bsd_ret(rsp, coop_r(coop_vnet_close(n, req.arg<int32_t>(0))));
         return bsd_ret(rsp, vsock::stack().close(req.arg<int32_t>(0)));
     });
@@ -357,6 +416,69 @@ std::shared_ptr<ipc::Service> make_bsd() {
             {200, "SetThreadCoreMask", K::Ok},
             {201, "GetThreadCoreMask", K::U32, 0},
         });
+        if (cloud::enabled())   // EventFd (u64 initial value, i32 flags): the SDK's gRPC wake-up descriptor; the game aborts without it
+            cmd(s, "bsd", 31, "EventFd", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+                return bsd_ret(rsp, cloud::eventfd(req.arg<uint64_t>(8), req.arg<int32_t>(0)));   // (u32 flags, pad, u64 initial value)
+            });
+        if (cloud::enabled()) {
+            // SendMMsg (fd, vlen, flags) and RecvMMsg (fd, vlen, flags, reserved, timeval): one in/out buffer holding the messages in
+            // nn::socket's serialized form (layout after Ryujinx Sockets/Bsd/Types/BsdMsgHdr.cs, MIT): one header byte, then per message
+            // u32 name length + name, u32 iov count, per iov u64 length + data, u32 control length + control, u32 flags, u32 length
+            // (the bytes moved, written back). The SDK's gRPC moves all its TCP data with these two. Host TCP sockets only.
+            auto mmsg = [](bool send) {
+                return [send](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+                    const int fd = req.arg<int32_t>(0), vlen = req.arg<int32_t>(4), flags = req.arg<int32_t>(8);
+                    if (!cloud::is_host_fd(fd)) return bsd_ret(rsp, {-1, kBsdNetDown});
+                    const ipc::Buffer buf = req.out_buf(0);
+                    uint8_t* p = buf_mut(buf);
+                    const uint8_t* end = p + buf.size;
+                    if (!buf.addr || buf.size < 1) return bsd_ret(rsp, {-1, vsock::kEinval});
+                    uint8_t* q = p + 1;
+                    auto rd32 = [&](uint32_t* v) { if (q + 4 > end) return false; std::memcpy(v, q, 4); q += 4; return true; };
+                    int done = 0;
+                    vsock::Ret last{0, 0};
+                    for (int m = 0; m < vlen; ++m) {
+                        uint32_t namelen = 0, iovs = 0, ctl = 0;
+                        if (!rd32(&namelen) || q + namelen > end) return bsd_ret(rsp, {-1, 14});
+                        q += namelen;
+                        if (!rd32(&iovs)) return bsd_ret(rsp, {-1, 14});
+                        uint32_t moved = 0;
+                        bool stop = false;
+                        for (uint32_t i = 0; i < iovs; ++i) {
+                            uint64_t len = 0;
+                            if (q + 8 > end) return bsd_ret(rsp, {-1, 14});
+                            std::memcpy(&len, q, 8);
+                            q += 8;
+                            if (len > static_cast<uint64_t>(end - q)) return bsd_ret(rsp, {-1, 14});
+                            if (len && !stop) {
+                                last = send ? cloud::send(fd, q, static_cast<size_t>(len), flags)
+                                            : cloud::recv(fd, q, static_cast<size_t>(len), moved ? (flags | vsock::kMsgDontwait) : flags);
+                                if (last.err || last.ret <= 0) stop = true;
+                                else {
+                                    moved += static_cast<uint32_t>(last.ret);
+                                    if (static_cast<uint64_t>(last.ret) < len) stop = true;
+                                }
+                            }
+                            q += len;
+                        }
+                        if (!rd32(&ctl) || q + ctl > end) return bsd_ret(rsp, {-1, 14});
+                        q += ctl;
+                        if (q + 8 > end) return bsd_ret(rsp, {-1, 14});
+                        q += 4;                               // msg flags
+                        std::memcpy(q, &moved, 4);            // msg length
+                        q += 4;
+                        const bool eof = !send && !last.err && last.ret == 0;
+                        if (moved || eof) ++done;
+                        if (stop && !(moved && !last.err)) break;
+                        if (!send) break;                     // a stream: one message per call is all there is to read at once
+                    }
+                    if (done == 0 && last.err) return bsd_ret(rsp, {-1, last.err});
+                    return bsd_ret(rsp, {done, 0});
+                };
+            };
+            cmd(s, "bsd", 29, "RecvMMsg", mmsg(false));
+            cmd(s, "bsd", 30, "SendMMsg", mmsg(true));
+        }
     });
 }
 

@@ -20,7 +20,7 @@ namespace {
 
 constexpr size_t kMaxMessage = 2000;     // longer messages are cut to this many bytes and get "..."
 constexpr size_t kFormatBuffer = 4096;   // vsnprintf target; anything longer is cut anyway
-constexpr unsigned kFlushEvery = 100;    // lines between flushes for Info and below
+constexpr unsigned kFlushEvery = 1;   /* DEBUG cloud PoC, was 100 */    // lines between flushes for Info and below
 constexpr char kLevelLetters[] = "EWIDT";
 constexpr int kLevelCount = 5;
 

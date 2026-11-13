@@ -263,7 +263,48 @@ void emit(const std::string& text) {
     for (;;) Sleep(1000);
 }
 
+// DEBUG cloud PoC: one raw line per exception before the report is built (the report itself can fault and end the process silently).
+void debug_first_line(const char* where, EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord) return;
+    HMODULE mod = nullptr;
+    char name[260] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(ep->ExceptionRecord->ExceptionAddress), &mod) && mod)
+        GetModuleFileNameA(mod, name, sizeof name);
+    if (FILE* f = std::fopen("pkp_exc.txt", "a")) {
+        std::fprintf(f, "%s: code 0x%08lx at %p (%s+0x%llx) tid %lu info0 0x%llx info1 0x%llx\n", where, ep->ExceptionRecord->ExceptionCode,
+                     ep->ExceptionRecord->ExceptionAddress, name,
+                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ep->ExceptionRecord->ExceptionAddress) - reinterpret_cast<uintptr_t>(mod)),
+                     GetCurrentThreadId(),
+                     static_cast<unsigned long long>(ep->ExceptionRecord->NumberParameters > 0 ? ep->ExceptionRecord->ExceptionInformation[0] : 0),
+                     static_cast<unsigned long long>(ep->ExceptionRecord->NumberParameters > 1 ? ep->ExceptionRecord->ExceptionInformation[1] : 0));
+        std::fflush(f);
+        const uint64_t rip = reinterpret_cast<uintptr_t>(ep->ExceptionRecord->ExceptionAddress);
+        std::fprintf(f, "  guest function f_%llx\n", static_cast<unsigned long long>(guest_function_of(rip)));
+        std::fflush(f);
+        if (::Ctx* g = diag_thread_ctx()) {
+            for (int n = 0; n <= 30; ++n) std::fprintf(f, "%sx%d=%llx", n ? " " : "  ", n, static_cast<unsigned long long>(reg(g, n)));
+            std::fprintf(f, "\n  sp=%llx lr=%llx chain:", static_cast<unsigned long long>(sp(g)), static_cast<unsigned long long>(lr(g)));
+            std::fflush(f);
+            uint64_t fr = fp(g);
+            for (int i = 0; i < 24 && fr && readable(fr, 16); ++i) {
+                const uint64_t next = *reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(fr));
+                const uint64_t ret = *reinterpret_cast<const uint64_t*>(static_cast<uintptr_t>(fr + 8));
+                std::fprintf(f, " %llx", static_cast<unsigned long long>(ret));
+                std::fflush(f);
+                if (next <= fr) break;
+                fr = next;
+            }
+            std::fprintf(f, "\n");
+        } else {
+            std::fprintf(f, "  no guest context on this thread\n");
+        }
+        std::fclose(f);
+    }
+}
+
 LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
+    debug_first_line("filter", ep);
     if (ep && ep->ExceptionRecord && ep->ExceptionRecord->ExceptionCode == EXCEPTION_STACK_OVERFLOW &&
         g_overflow_reported.exchange(false))
         return EXCEPTION_CONTINUE_SEARCH;  // the vectored handler already wrote this report
@@ -287,6 +328,7 @@ DWORD WINAPI overflow_thread(LPVOID) {
 LONG WINAPI crash_vectored(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord || !ep->ContextRecord) return EXCEPTION_CONTINUE_SEARCH;
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    debug_first_line("vectored", ep);
     if (g_in_handler.exchange(true)) second_exception();
     g_ov_rec = *ep->ExceptionRecord;
     g_ov_ctx = *ep->ContextRecord;

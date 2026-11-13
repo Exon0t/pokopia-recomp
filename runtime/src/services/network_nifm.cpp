@@ -144,6 +144,7 @@ std::shared_ptr<ipc::Service> make_general() {
             {30, "SetEthernetCommunicationEnabledForTest", K::Ok},
             {32, "GetTelemetryInfo", K::Ok},
             {33, "ConfirmSystemAvailability", online ? K::Ok : K::Fail, kNifmNoConnection},
+            {101, "Cmd101", K::Zeros, 0, 16},   // Switch 2, no public name: the SDK calls it when the game goes online and exits if it fails
             {34, "SetBackgroundRequestEnabled", K::Ok},
             {35, "GetScanData", K::S32, 0},
             {36, "GetCurrentAccessPoint", K::Fail, kNifmNoConnection},
