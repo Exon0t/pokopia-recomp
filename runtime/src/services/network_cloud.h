@@ -32,6 +32,7 @@ bool is_host_fd(int fd);
 bool any_host_fd(const PollFd* fds, size_t n);
 vsock::Ret socket(int domain, int type, int protocol);
 vsock::Ret eventfd(uint64_t init, int flags);          // bsd EventFd: flags bit 0 semaphore, bit 2 non-blocking; read/write are recv/send of 8 bytes
+bool to_gateway(int fd);                                // swap the connection for one to the local TLS gateway (before any data)
 int dup(int fd);                                        // a second descriptor of the same socket (-1: bad descriptor); for ssl
 vsock::Ret connect(int fd, vsock::Addr a);
 vsock::Ret bind(int fd, vsock::Addr a);

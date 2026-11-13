@@ -284,6 +284,29 @@ vsock::Ret eventfd(uint64_t init, int flags) {
     return r;
 }
 
+// The console's TLS service is about to run TLS on this socket, and the runtime has no TLS: swap the connection for one to the
+// local gateway (127.0.0.1:[net] cloud_gateway_port), which does the TLS to the server. Nothing has been sent on it yet.
+bool to_gateway(int fd) {
+    auto sk = get(fd);
+    if (!sk || sk->event || !gateway_port()) return false;
+    const SOCKET n = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (n == INVALID_SOCKET) return false;
+    sockaddr_in sa = to_sa({0x7F000001u, gateway_port()});
+    if (::connect(n, reinterpret_cast<sockaddr*>(&sa), sizeof sa) != 0) {
+        NXLOG_W("net", "cloud: no gateway on 127.0.0.1:%u (Winsock %d): the upload connection stays as it is", gateway_port(), WSAGetLastError());
+        closesocket(n);
+        return false;
+    }
+    const BOOL on = TRUE;
+    ::setsockopt(n, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&on), sizeof on);
+    if (sk->nonblock) set_nonblock(n, true);
+    const SOCKET old = sk->s;
+    sk->s = n;
+    closesocket(old);
+    NXLOG_I("net", "cloud: fd %d now goes through the local TLS gateway (port %u)", fd, gateway_port());
+    return true;
+}
+
 int dup(int fd) {
     auto sk = get(fd);
     if (!sk) return -1;
@@ -295,7 +318,6 @@ vsock::Ret connect(int fd, vsock::Addr a) {
     auto sk = get(fd);
     if (!sk) return fail(vsock::kEbadf);
     vsock::Addr target = a;
-    if (a.ip == server_ip() && a.port == 443 && gateway_port()) target = {0x7F000001u, gateway_port()};
     const bool redirected = target.ip != a.ip || target.port != a.port;
     NXLOG_I("net", "cloud: connect fd %d -> %u.%u.%u.%u:%u%s", fd, a.ip >> 24, (a.ip >> 16) & 255, (a.ip >> 8) & 255, a.ip & 255, a.port,
             redirected ? " (through the local gateway)" : "");

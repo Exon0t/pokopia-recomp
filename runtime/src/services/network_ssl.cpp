@@ -134,6 +134,7 @@ std::shared_ptr<ipc::Service> make_ssl_connection(const std::shared_ptr<int>& co
                 int fd = -1;        // our own descriptor of the game's socket (cloud::dup)
                 int given = -1;     // the descriptor the game passed
                 uint32_t io = 1;    // IoMode: 1 blocking, 2 non-blocking
+                bool http11 = false;   // the game offered http/1.1 in SetNextAlpnProto
                 ~Pass() {
                     if (fd >= 0) cloud::close(fd);
                 }
@@ -142,6 +143,7 @@ std::shared_ptr<ipc::Service> make_ssl_connection(const std::shared_ptr<int>& co
             constexpr uint32_t kWouldBlock = res(123, 204), kTimeout = res(123, 205), kReset = res(123, 209);
             cmd(svc, "ssl", 0, "SetSocketDescriptor", [ps](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
                 const int fd = req.arg<int32_t>(0);
+                cloud::to_gateway(fd);
                 const int d = cloud::dup(fd);
                 if (d < 0) return kSslInvalidSocket;
                 ps->fd = d;
@@ -220,9 +222,21 @@ std::shared_ptr<ipc::Service> make_ssl_connection(const std::shared_ptr<int>& co
                 rsp.push(static_cast<uint32_t>(w));
                 return 0;
             });
-            cmd(svc, "ssl", 27, "GetNextAlpnProto", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
-                const uint32_t n = static_cast<uint32_t>(buf_write(req.out_buf(0), "h2", 2));   // the gateway offers h2 upstream (gRPC)
-                rsp.push(uint32_t{1});   // AlpnProtoState Negotiated
+            // ALPN: the gateway speaks http/1.1 upstream (the storage endpoints take it). The game is told http/1.1 when it offered it,
+            // else "no ALPN".
+            cmd(svc, "ssl", 26, "SetNextAlpnProto", [ps](ipc::Request& req, ipc::Response&) -> uint32_t {
+                const ipc::Buffer in = req.in_buf(0);
+                const uint8_t* p = buf_ptr(in);
+                for (uint64_t i = 0; in.addr && i < in.size;) {
+                    const uint64_t len = p[i];
+                    if (len == 8 && i + 9 <= in.size && std::memcmp(p + i + 1, "http/1.1", 8) == 0) ps->http11 = true;
+                    i += 1 + len;
+                }
+                return 0;
+            });
+            cmd(svc, "ssl", 27, "GetNextAlpnProto", [ps](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+                const uint32_t n = ps->http11 ? static_cast<uint32_t>(buf_write(req.out_buf(0), "http/1.1", 8)) : 0;
+                rsp.push(uint32_t{ps->http11 ? 1u : 0u});   // AlpnProtoState: Negotiated / NoSupport
                 rsp.push(n);
                 return 0;
             });
@@ -241,6 +255,12 @@ std::shared_ptr<ipc::Service> make_ssl_service() {
             NetState& n = st();
             std::lock_guard<std::mutex> lk(n.mu);
             rsp.push(static_cast<uint32_t>(n.ssl_contexts));
+            return 0;
+        });
+        // cmd 100 CreateContextForSystem (in: version + pid placeholder): the game's HTTP client (island uploads) opens its context
+        // with this one on ssl:s. Same context object.
+        cmd(s, "ssl", 100, "CreateContextForSystem", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+            rsp.push_object(make_ssl_context());
             return 0;
         });
         rows(s, "ssl", {
