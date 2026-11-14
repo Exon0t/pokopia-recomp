@@ -21,6 +21,7 @@
 #include "coop.h"
 #include "ldn.h"
 #include "services_internal.h"
+#include "network_cloud.h"
 
 namespace nxrt::services::netsvc {
 
@@ -98,10 +99,108 @@ void write_text(const ipc::Buffer& out, const std::string& text) {
 
 }  // namespace
 
+namespace {
+
+// Cloud Island proof of concept: the NPLN names resolve to [net] cloud_server. Layouts after libnx nx/source/runtime/resolver.c (ISC).
+void be32(std::vector<uint8_t>& v, uint32_t x) {
+    v.push_back(static_cast<uint8_t>(x >> 24)); v.push_back(static_cast<uint8_t>(x >> 16));
+    v.push_back(static_cast<uint8_t>(x >> 8)); v.push_back(static_cast<uint8_t>(x));
+}
+
+// The name in input buffer n when it is one of the cloud names, else "".
+std::string cloud_name(const ipc::Request& req, size_t n) {
+    if (!cloud::enabled()) return "";
+    const std::string host = buf_text(req.in_buf(n));
+    if (!cloud::is_cloud_name(host)) return "";
+    NXLOG_D("net", "cloud: %s resolves to the cloud server", host.c_str());
+    return host;
+}
+
+// One serialized addrinfo (AF_INET, SOCK_STREAM, TCP) for the cloud server, then the 0 sentinel. Every field is byte-swapped, the
+// sockaddr's port and address a second time (so they sit little-endian), as the console's resolver does.
+std::vector<uint8_t> cloud_addrinfo(uint16_t port) {
+    std::vector<uint8_t> v;
+    be32(v, 0xBEEFCAFE); be32(v, 0); be32(v, 2); be32(v, 1); be32(v, 6); be32(v, 16);
+    const uint32_t ip = cloud::server_ip();
+    const uint8_t sa[16] = {16, 2, static_cast<uint8_t>(port), static_cast<uint8_t>(port >> 8), static_cast<uint8_t>(ip),
+                            static_cast<uint8_t>(ip >> 8), static_cast<uint8_t>(ip >> 16), static_cast<uint8_t>(ip >> 24)};
+    v.insert(v.end(), sa, sa + 16);
+    v.push_back(0);        // no canonical name
+    be32(v, 0);            // sentinel
+    return v;
+}
+
+// A serialized hostent: name, 0 aliases, AF_INET, 4-byte addresses, one address in network order.
+std::vector<uint8_t> cloud_hostent(const std::string& host) {
+    std::vector<uint8_t> v(host.begin(), host.end());
+    v.push_back(0);
+    be32(v, 0);
+    v.push_back(0); v.push_back(2); v.push_back(0); v.push_back(4);
+    be32(v, 1);
+    be32(v, cloud::server_ip());
+    return v;
+}
+
+// A dotted IPv4 literal ("127.0.0.1": the game resolves the STUN server the cloud server hands out this way) as a host-order address.
+bool numeric_host(const ipc::Request& req, uint32_t* ip) {
+    if (!cloud::enabled()) return false;
+    const std::string h = buf_text(req.in_buf(0));
+    uint32_t v = 0;
+    int parts = 0, cur = -1;
+    for (char c : h) {
+        if (c >= '0' && c <= '9') {
+            cur = (cur < 0 ? 0 : cur) * 10 + (c - '0');
+            if (cur > 255) return false;
+        } else if (c == '.' && cur >= 0 && parts < 3) {
+            v = (v << 8) | static_cast<uint32_t>(cur);
+            cur = -1;
+            ++parts;
+        } else {
+            return false;
+        }
+    }
+    if (parts != 3 || cur < 0) return false;
+    *ip = (v << 8) | static_cast<uint32_t>(cur);
+    return true;
+}
+
+// The addrinfo list of a numeric host: one datagram (UDP) entry and one stream (TCP) entry, then the 0 sentinel.
+std::vector<uint8_t> numeric_addrinfo(uint32_t ip, uint16_t port) {
+    std::vector<uint8_t> v;
+    for (int k = 0; k < 2; ++k) {
+        be32(v, 0xBEEFCAFE); be32(v, 0); be32(v, 2); be32(v, k == 0 ? 2 : 1); be32(v, k == 0 ? 17 : 6); be32(v, 16);
+        const uint8_t sa[16] = {16, 2, static_cast<uint8_t>(port), static_cast<uint8_t>(port >> 8), static_cast<uint8_t>(ip),
+                                static_cast<uint8_t>(ip >> 8), static_cast<uint8_t>(ip >> 16), static_cast<uint8_t>(ip >> 24)};
+        v.insert(v.end(), sa, sa + 16);
+        v.push_back(0);
+    }
+    be32(v, 0);
+    return v;
+}
+
+uint16_t service_port(const ipc::Request& req) {
+    const std::string s = buf_text(req.in_buf(1));
+    int p = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return 0;
+        p = p * 10 + (c - '0');
+    }
+    return static_cast<uint16_t>(p);
+}
+
+}  // namespace
+
 std::shared_ptr<ipc::Service> make_resolver() {
     return make_iface("nn::socket::resolver::IResolver", [](ipc::Service& s) {
         // GetHostByNameRequest / GetHostByAddrRequest: (netdb_error, bsd_errno, size)
-        cmd(s, "sfdnsres", 2, "GetHostByNameRequest", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+        cmd(s, "sfdnsres", 2, "GetHostByNameRequest", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            if (const std::string h = cloud_name(req, 0); !h.empty()) {
+                const std::vector<uint8_t> v = cloud_hostent(h);
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                return 0;
+            }
             rsp.push(static_cast<uint32_t>(kNetdbHostNotFound));
             rsp.push(static_cast<uint32_t>(kBsdNetDown));
             rsp.push(static_cast<uint32_t>(0));
@@ -126,6 +225,20 @@ std::shared_ptr<ipc::Service> make_resolver() {
         // GetAddrInfoRequest: (bsd_errno, gai_error, size)
         cmd(s, "sfdnsres", 6, "GetAddrInfoRequest", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             ask_dns(req);
+            if (!cloud_name(req, 0).empty()) {
+                const std::vector<uint8_t> v = cloud_addrinfo(service_port(req));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<int32_t>(0));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                return 0;
+            }
+            if (uint32_t nip = 0; numeric_host(req, &nip)) {
+                const std::vector<uint8_t> v = numeric_addrinfo(nip, service_port(req));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<int32_t>(0));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                return 0;
+            }
             rsp.push(static_cast<uint32_t>(0));
             rsp.push(static_cast<int32_t>(kEaiNoName));
             rsp.push(static_cast<uint32_t>(0));
@@ -139,7 +252,14 @@ std::shared_ptr<ipc::Service> make_resolver() {
             {9, "CancelRequest", K::Ok},
         });
         // GetHostByNameRequestWithOptions / GetHostByAddrRequestWithOptions: (size, netdb_error, bsd_errno)
-        cmd(s, "sfdnsres", 10, "GetHostByNameRequestWithOptions", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+        cmd(s, "sfdnsres", 10, "GetHostByNameRequestWithOptions", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
+            if (const std::string h = cloud_name(req, 0); !h.empty()) {
+                const std::vector<uint8_t> v = cloud_hostent(h);
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                return 0;
+            }
             rsp.push(static_cast<uint32_t>(0));
             rsp.push(static_cast<uint32_t>(kNetdbHostNotFound));
             rsp.push(static_cast<uint32_t>(kBsdNetDown));
@@ -154,6 +274,22 @@ std::shared_ptr<ipc::Service> make_resolver() {
         // GetAddrInfoRequestWithOptions: (size, gai_error, netdb_error, bsd_errno)
         cmd(s, "sfdnsres", 12, "GetAddrInfoRequestWithOptions", [](ipc::Request& req, ipc::Response& rsp) -> uint32_t {
             ask_dns(req);
+            if (!cloud_name(req, 0).empty()) {
+                const std::vector<uint8_t> v = cloud_addrinfo(service_port(req));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                rsp.push(static_cast<int32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                return 0;
+            }
+            if (uint32_t nip = 0; numeric_host(req, &nip)) {
+                const std::vector<uint8_t> v = numeric_addrinfo(nip, service_port(req));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                rsp.push(static_cast<int32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                return 0;
+            }
             rsp.push(static_cast<uint32_t>(0));
             rsp.push(static_cast<int32_t>(kEaiNoName));
             rsp.push(static_cast<uint32_t>(0));
