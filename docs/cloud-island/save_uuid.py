@@ -3,7 +3,7 @@
 # For test copies only: two copies of one save are the same player, and a Link Play / Cloud Island host refuses its own id (error 9005).
 import sys, os, zlib, struct, glob, collections
 base = sys.argv[1]; mode = sys.argv[2] if len(sys.argv) > 2 else 'show'
-root = glob.glob(os.path.join(base, 'account', '*/'))[0]
+root = [d for d in sorted(glob.glob(os.path.join(base, 'account', '*/'))) if '.' not in os.path.basename(os.path.normpath(d))][0]
 def cmn(p):
     f = open(p, 'rb').read(); end = struct.unpack_from('<I', f, 0x10)[0]
     return f, zlib.decompress(f[0x130:end])
