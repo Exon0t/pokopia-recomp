@@ -35,6 +35,7 @@ struct Cfg {
     bool enabled = false;
     uint32_t ip = 0;
     uint16_t gateway = 0;
+    uint16_t storage = 0;
 };
 
 const Cfg& cfg() {
@@ -47,8 +48,13 @@ const Cfg& cfg() {
             r.ip = ntohl(a.s_addr);
             r.enabled = true;
             r.gateway = static_cast<uint16_t>(config_get_int("net", "cloud_gateway_port", 18443));
-            NXLOG_I("net", "[net] cloud_server = %s: the NPLN names resolve there, SOCK_STREAM sockets are host TCP, ssl passes bytes through"
-                           " (guest port 443 -> 127.0.0.1:%u)", s.c_str(), r.gateway);
+            r.storage = static_cast<uint16_t>(config_get_int("net", "cloud_storage_port", 0));
+            if (r.storage)
+                NXLOG_I("net", "[net] cloud_server = %s: the NPLN names resolve there, SOCK_STREAM sockets are host TCP, nn::ssl connections"
+                               " go to the server's plain HTTP storage port %u (no TLS on the island file)", s.c_str(), r.storage);
+            else
+                NXLOG_I("net", "[net] cloud_server = %s: the NPLN names resolve there, SOCK_STREAM sockets are host TCP, ssl passes bytes through"
+                               " (guest port 443 -> 127.0.0.1:%u)", s.c_str(), r.gateway);
         } else {
             NXLOG_W("net", "[net] cloud_server = \"%s\" is not an IPv4 address: cloud islands stay off", s.c_str());
         }
@@ -199,6 +205,7 @@ vsock::Ret add_fd(const std::shared_ptr<Sock>& sk);
 bool enabled() { return cfg().enabled; }
 uint32_t server_ip() { return cfg().ip; }
 uint16_t gateway_port() { return cfg().gateway; }
+uint16_t storage_port() { return cfg().storage; }
 
 const std::vector<uint8_t>& ca_der() {
     static const std::vector<uint8_t> der = [] {
@@ -356,12 +363,15 @@ vsock::Ret eventfd(uint64_t init, int flags) {
 // local gateway (127.0.0.1:[net] cloud_gateway_port), which does the TLS to the server. Nothing has been sent on it yet.
 bool to_gateway(int fd) {
     auto sk = get(fd);
-    if (!sk || sk->event || !gateway_port()) return false;
+    if (!sk || sk->event || (!gateway_port() && !storage_port())) return false;
     const SOCKET n = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (n == INVALID_SOCKET) return false;
-    sockaddr_in sa = to_sa({0x7F000001u, gateway_port()});
+    // [net] cloud_storage_port: straight to the server's plain HTTP storage port; else the local TLS gateway
+    const vsock::Addr to = storage_port() ? vsock::Addr{server_ip(), storage_port()} : vsock::Addr{0x7F000001u, gateway_port()};
+    sockaddr_in sa = to_sa(to);
     if (::connect(n, reinterpret_cast<sockaddr*>(&sa), sizeof sa) != 0) {
-        NXLOG_W("net", "cloud: no gateway on 127.0.0.1:%u (Winsock %d): the upload connection stays as it is", gateway_port(), WSAGetLastError());
+        NXLOG_W("net", "cloud: nothing answers on %u.%u.%u.%u:%u (Winsock %d): the upload connection stays as it is", to.ip >> 24,
+                (to.ip >> 16) & 255, (to.ip >> 8) & 255, to.ip & 255, to.port, WSAGetLastError());
         closesocket(n);
         return false;
     }
@@ -371,7 +381,7 @@ bool to_gateway(int fd) {
     const SOCKET old = sk->s;
     sk->s = n;
     closesocket(old);
-    NXLOG_D("net", "cloud: fd %d now goes through the local TLS gateway (port %u)", fd, gateway_port());
+    NXLOG_D("net", "cloud: fd %d now goes to %s port %u", fd, storage_port() ? "the server's storage" : "the local TLS gateway", to.port);
     return true;
 }
 
