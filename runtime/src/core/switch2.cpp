@@ -155,6 +155,8 @@ void streamplay_native_window(::Ctx* c) { c->x[0] = reinterpret_cast<uint64_t>(g
 
 void set_hdr_luminance_sink(HdrLuminanceSink fn) { g_hdr_sink.store(fn, std::memory_order_release); }
 
+namespace services::netsvc::cloud { void install_fibers(); }
+
 void install_switch2_hle() {
     if (game::info().platform != game::Platform::Switch2) return;
     struct { const char* name; HleFn fn; } const items[] = {
@@ -193,6 +195,7 @@ void install_switch2_hle() {
         module_override_symbol("_ZN2nn5movie10InitializeEv");
     }
     NXLOG_I("switch2", "Switch 2 platform: graphics system boot answered on the host");
+    services::netsvc::cloud::install_fibers();   // cloud island proof of concept ([net] cloud_server), src/services/network_cloud.cpp
 }
 
 }  // namespace nxrt
