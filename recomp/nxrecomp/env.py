@@ -118,11 +118,19 @@ class Env:
         self.ends = {}
         for r in rows:
             self.ends[self.base + r['start']] = self.base + r['end']
+        added = []
         for off in list(self.cfg.extra_entries.get(self.img.name, ())) + list(extra):
             a = self.base + off
             if a not in self.ends:
                 self.ends[a] = self.base + off + 4
+                added.append(a)
         self.starts = sorted(self.ends)
+        # cloud island proof of concept: an extra entry in main is a whole function the discovery missed, not a 4-byte stub:
+        # it runs to the next known entry
+        if self.img.name == 'main':
+            for a in added:
+                i = bisect.bisect_right(self.starts, a)
+                self.ends[a] = self.starts[i] if i < len(self.starts) else self.text_hi
         # an extra entry splits the function it falls into: keep that function's end as is
         return self.starts
 
