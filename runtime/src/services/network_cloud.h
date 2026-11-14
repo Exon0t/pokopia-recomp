@@ -38,6 +38,10 @@ vsock::Ret connect(int fd, vsock::Addr a);
 vsock::Ret bind(int fd, vsock::Addr a);
 vsock::Ret send(int fd, const void* p, size_t n, int flags);
 vsock::Ret recv(int fd, void* p, size_t n, int flags);
+vsock::Ret sendto(int fd, const void* p, size_t n, int flags, const vsock::Addr* to);     // datagram sockets (host UDP): to may be null
+vsock::Ret recvfrom(int fd, void* p, size_t n, int flags, vsock::Addr* from);            // from (may be null) gets the sender
+bool is_dgram(int fd);
+uint32_t local_ip();          // this PC's IPv4 address on its default route, host order (127.0.0.1 when there is none)
 vsock::Ret shutdown(int fd, int how);
 vsock::Ret close(int fd);
 vsock::Ret fcntl(int fd, int cmd, int arg);

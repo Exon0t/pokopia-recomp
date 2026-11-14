@@ -141,6 +141,43 @@ std::vector<uint8_t> cloud_hostent(const std::string& host) {
     return v;
 }
 
+// A dotted IPv4 literal ("127.0.0.1": the game resolves the STUN server the cloud server hands out this way) as a host-order address.
+bool numeric_host(const ipc::Request& req, uint32_t* ip) {
+    if (!cloud::enabled()) return false;
+    const std::string h = buf_text(req.in_buf(0));
+    uint32_t v = 0;
+    int parts = 0, cur = -1;
+    for (char c : h) {
+        if (c >= '0' && c <= '9') {
+            cur = (cur < 0 ? 0 : cur) * 10 + (c - '0');
+            if (cur > 255) return false;
+        } else if (c == '.' && cur >= 0 && parts < 3) {
+            v = (v << 8) | static_cast<uint32_t>(cur);
+            cur = -1;
+            ++parts;
+        } else {
+            return false;
+        }
+    }
+    if (parts != 3 || cur < 0) return false;
+    *ip = (v << 8) | static_cast<uint32_t>(cur);
+    return true;
+}
+
+// The addrinfo list of a numeric host: one datagram (UDP) entry and one stream (TCP) entry, then the 0 sentinel.
+std::vector<uint8_t> numeric_addrinfo(uint32_t ip, uint16_t port) {
+    std::vector<uint8_t> v;
+    for (int k = 0; k < 2; ++k) {
+        be32(v, 0xBEEFCAFE); be32(v, 0); be32(v, 2); be32(v, k == 0 ? 2 : 1); be32(v, k == 0 ? 17 : 6); be32(v, 16);
+        const uint8_t sa[16] = {16, 2, static_cast<uint8_t>(port), static_cast<uint8_t>(port >> 8), static_cast<uint8_t>(ip),
+                                static_cast<uint8_t>(ip >> 8), static_cast<uint8_t>(ip >> 16), static_cast<uint8_t>(ip >> 24)};
+        v.insert(v.end(), sa, sa + 16);
+        v.push_back(0);
+    }
+    be32(v, 0);
+    return v;
+}
+
 uint16_t service_port(const ipc::Request& req) {
     const std::string s = buf_text(req.in_buf(1));
     int p = 0;
@@ -195,6 +232,13 @@ std::shared_ptr<ipc::Service> make_resolver() {
                 rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
                 return 0;
             }
+            if (uint32_t nip = 0; numeric_host(req, &nip)) {
+                const std::vector<uint8_t> v = numeric_addrinfo(nip, service_port(req));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<int32_t>(0));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                return 0;
+            }
             rsp.push(static_cast<uint32_t>(0));
             rsp.push(static_cast<int32_t>(kEaiNoName));
             rsp.push(static_cast<uint32_t>(0));
@@ -232,6 +276,14 @@ std::shared_ptr<ipc::Service> make_resolver() {
             ask_dns(req);
             if (!cloud_name(req, 0).empty()) {
                 const std::vector<uint8_t> v = cloud_addrinfo(service_port(req));
+                rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
+                rsp.push(static_cast<int32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                rsp.push(static_cast<uint32_t>(0));
+                return 0;
+            }
+            if (uint32_t nip = 0; numeric_host(req, &nip)) {
+                const std::vector<uint8_t> v = numeric_addrinfo(nip, service_port(req));
                 rsp.push(static_cast<uint32_t>(buf_write(req.out_buf(0), v.data(), v.size())));
                 rsp.push(static_cast<int32_t>(0));
                 rsp.push(static_cast<uint32_t>(0));

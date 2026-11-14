@@ -20,6 +20,7 @@
 #include "../net/vsock.h"
 #include "coop.h"
 #include "ldn.h"
+#include "network_cloud.h"
 #include "services_internal.h"
 
 namespace nxrt::services::netsvc {
@@ -170,6 +171,12 @@ std::shared_ptr<ipc::Service> make_general() {
             {56, "GetNetworkEmulationProfile", K::Fail, kNifmNoConnection},
             {57, "SetWowlTcpKeepAliveTimeout", K::Ok},
         });
+        if (netsvc::cloud::enabled())   // Cloud Island: the game's peer-to-peer code compares this with its interface list (bsd Sysctl)
+            cmd(s, "nifm", 12, "GetCurrentIpAddress", [](ipc::Request&, ipc::Response& rsp) -> uint32_t {
+                const uint32_t ip = netsvc::cloud::local_ip();
+                rsp.push(static_cast<uint32_t>((ip >> 24) | ((ip >> 16) & 255) << 8 | ((ip >> 8) & 255) << 16 | (ip & 255) << 24));
+                return 0;
+            });
     });
 }
 

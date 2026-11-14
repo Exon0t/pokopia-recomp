@@ -66,6 +66,7 @@ struct Sock {
     uint64_t counter = 0;
     std::mutex mu;                    // the counter and the wake byte
     int type = vsock::kSockStream;
+    bool as_local = false;            // a datagram socket the game bound to this PC's address: bound to any address, named as asked
     std::map<uint64_t, int32_t> opts;   // (level << 32 | option) -> the last int set: read back by getsockopt (gRPC verifies what it set)
     ~Sock() {
         if (s != INVALID_SOCKET) closesocket(s);
@@ -237,9 +238,14 @@ vsock::Ret socket(int domain, int type, int protocol) {
     if (!enabled() || !vnet::ensure_winsock()) return fail(vsock::kEnetdown);
     if (domain != vsock::kAfInet) return fail(vsock::kEafnosupport);
     const int base = type & 0xFFFF;
-    if (base != vsock::kSockStream) return fail(vsock::kEprotonosupport);
-    const SOCKET s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (base != vsock::kSockStream && base != vsock::kSockDgram) return fail(vsock::kEprotonosupport);
+    const bool dgram = base == vsock::kSockDgram;
+    const SOCKET s = dgram ? ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s == INVALID_SOCKET) return wsafail();
+    if (dgram) {   // Winsock reports an ICMP port-unreachable as WSAECONNRESET on the next receive: off, as on every other system
+        DWORD off = 0, got = 0;
+        WSAIoctl(s, 0x9800000C /* SIO_UDP_CONNRESET */, &off, sizeof off, nullptr, 0, &got, nullptr, nullptr);
+    }
     auto sk = std::make_shared<Sock>();
     sk->s = s;
     sk->type = base;
@@ -248,8 +254,98 @@ vsock::Ret socket(int domain, int type, int protocol) {
         sk->nonblock = true;
     }
     const vsock::Ret r = add_fd(sk);
-    if (!r.err) NXLOG_I("net", "cloud: host TCP socket fd %d%s", r.ret, sk->nonblock ? " (non-blocking)" : "");
+    if (!r.err) NXLOG_I("net", "cloud: host %s socket fd %d%s", dgram ? "UDP" : "TCP", r.ret, sk->nonblock ? " (non-blocking)" : "");
     return r;
+}
+
+uint32_t local_ip() {
+    static const uint32_t ip = [] {
+        uint32_t out = 0x7F000001u;
+        if (!vnet::ensure_winsock()) return out;
+        const SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s == INVALID_SOCKET) return out;
+        sockaddr_in to = to_sa({0xC0000201u, 9});   // 192.0.2.1 (TEST-NET-1): connecting a UDP socket sends nothing, it only picks the route
+        sockaddr_in me{};
+        int len = sizeof me;
+        if (::connect(s, reinterpret_cast<sockaddr*>(&to), sizeof to) == 0 && ::getsockname(s, reinterpret_cast<sockaddr*>(&me), &len) == 0 &&
+            me.sin_addr.s_addr != 0)
+            out = ntohl(me.sin_addr.s_addr);
+        closesocket(s);
+        NXLOG_I("net", "cloud: this PC's address for peers is %u.%u.%u.%u", out >> 24, (out >> 16) & 255, (out >> 8) & 255, out & 255);
+        return out;
+    }();
+    return ip;
+}
+
+namespace {
+// The first bytes of a datagram as hex, for the log.
+std::string hex_head(const void* p, size_t n) {
+    static const char* d = "0123456789abcdef";
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    std::string o;
+    for (size_t i = 0; i < n && i < 160; ++i) {
+        o.push_back(d[b[i] >> 4]);
+        o.push_back(d[b[i] & 15]);
+    }
+    return o;
+}
+}  // namespace
+
+bool is_dgram(int fd) {
+    auto sk = get(fd);
+    return sk && !sk->event && sk->type == vsock::kSockDgram;
+}
+
+vsock::Ret sendto(int fd, const void* p, size_t n, int flags, const vsock::Addr* to) {
+    auto sk = get(fd);
+    if (!sk || sk->event) return fail(vsock::kEbadf);
+    const bool dontwait = (flags & vsock::kMsgDontwait) && !sk->nonblock;
+    if (dontwait) set_nonblock(sk->s, true);
+    int r;
+    if (to) {
+        sockaddr_in sa = to_sa(*to);
+        r = ::sendto(sk->s, static_cast<const char*>(p), static_cast<int>(n), 0, reinterpret_cast<sockaddr*>(&sa), sizeof sa);
+    } else {
+        r = ::send(sk->s, static_cast<const char*>(p), static_cast<int>(n), 0);
+    }
+    const int e = r < 0 ? WSAGetLastError() : 0;
+    if (dontwait) set_nonblock(sk->s, false);
+    static int logged = 0;
+    if (logged < 400) {
+        ++logged;
+        if (to) NXLOG_I("net", "cloud: udp fd %d sendto %u.%u.%u.%u:%u %zu bytes -> %d (Winsock %d) %s", fd, to->ip >> 24, (to->ip >> 16) & 255,
+                        (to->ip >> 8) & 255, to->ip & 255, to->port, n, r, e, hex_head(p, n).c_str());
+        else NXLOG_I("net", "cloud: udp fd %d send %zu bytes -> %d (Winsock %d) %s", fd, n, r, e, hex_head(p, n).c_str());
+    }
+    if (r < 0) return fail(lin(e));
+    return {r, 0};
+}
+
+vsock::Ret recvfrom(int fd, void* p, size_t n, int flags, vsock::Addr* from) {
+    auto sk = get(fd);
+    if (!sk || sk->event) return fail(vsock::kEbadf);
+    const bool dontwait = (flags & vsock::kMsgDontwait) && !sk->nonblock;
+    if (dontwait) set_nonblock(sk->s, true);
+    sockaddr_in sa{};
+    int sl = sizeof sa;
+    int r = ::recvfrom(sk->s, static_cast<char*>(p), static_cast<int>(n > 0x7fffffff ? 0x7fffffff : n), (flags & vsock::kMsgPeek) ? MSG_PEEK : 0,
+                       reinterpret_cast<sockaddr*>(&sa), &sl);
+    int e = r < 0 ? WSAGetLastError() : 0;
+    if (r < 0 && e == WSAEMSGSIZE) {   // a datagram longer than the buffer: the buffer is full, the rest is dropped
+        r = static_cast<int>(n);
+        e = 0;
+    }
+    if (dontwait) set_nonblock(sk->s, false);
+    if (r < 0) return fail(lin(e));
+    if (from) *from = from_sa(sa);
+    static int logged = 0;
+    if (logged < 400) {
+        ++logged;
+        const vsock::Addr a = from_sa(sa);
+        NXLOG_I("net", "cloud: udp fd %d recvfrom %u.%u.%u.%u:%u %d bytes %s", fd, a.ip >> 24, (a.ip >> 16) & 255, (a.ip >> 8) & 255, a.ip & 255,
+                a.port, r, hex_head(p, static_cast<size_t>(r)).c_str());
+    }
+    return {r, 0};
 }
 
 namespace {
@@ -332,6 +428,12 @@ vsock::Ret connect(int fd, vsock::Addr a) {
 vsock::Ret bind(int fd, vsock::Addr a) {
     auto sk = get(fd);
     if (!sk) return fail(vsock::kEbadf);
+    NXLOG_I("net", "cloud: bind fd %d to %u.%u.%u.%u:%u", fd, a.ip >> 24, (a.ip >> 16) & 255, (a.ip >> 8) & 255, a.ip & 255, a.port);
+    if (sk->type == vsock::kSockDgram && a.ip == local_ip() && a.ip != 0x7F000001u) {
+        // Winsock cannot send from a socket bound to the LAN address to 127.0.0.1 (a STUN server on this PC): bind to any address.
+        sk->as_local = true;
+        a.ip = 0;
+    }
     sockaddr_in sa = to_sa(a);
     if (::bind(sk->s, reinterpret_cast<sockaddr*>(&sa), sizeof sa) != 0) return wsafail();
     return {0, 0};
@@ -523,6 +625,9 @@ vsock::Ret getsockname(int fd, vsock::Addr* a) {
     int len = sizeof sa;
     if (::getsockname(sk->s, reinterpret_cast<sockaddr*>(&sa), &len) != 0) return wsafail();
     *a = from_sa(sa);
+    if (sk->as_local && a->ip == 0) a->ip = local_ip();
+    if (sk->type == vsock::kSockDgram)
+        NXLOG_I("net", "cloud: udp fd %d is %u.%u.%u.%u:%u", fd, a->ip >> 24, (a->ip >> 16) & 255, (a->ip >> 8) & 255, a->ip & 255, a->port);
     return {0, 0};
 }
 
