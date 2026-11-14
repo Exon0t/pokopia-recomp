@@ -45,37 +45,47 @@ def handle(conn, addr, args, ctx, f, n):
     except Exception as e:
         log(f, f"c{n} upstream connect failed: {e}")
         conn.close(); return
-    # One thread per connection moves both directions: an SSLSocket must not be read and written from two threads at once
-    # (seen 2026-11-13: a request forwarded while the other thread sat in recv got no answer).
+    # One thread per connection moves both directions: an SSLSocket must not be read and written from two threads at once.
+    # The TLS side is non-blocking: after the handshake a TLS 1.3 server sends session tickets, which make the socket readable
+    # without any application data, and a blocking read there would hold up the upload going the other way.
     conn.settimeout(None)
+    up.setblocking(False)
     def note(tag, data):
         stats[tag] += len(data)
         if stats[tag] == len(data):
             log(f, f"{stats['id']} {tag} first bytes: {data[:24]!r}")
+    def up_send(data):
+        view = memoryview(data)
+        while view:
+            try:
+                view = view[up.send(view):]
+            except ssl.SSLWantWriteError:
+                select.select([], [up], [], 30)
+            except ssl.SSLWantReadError:
+                select.select([up], [], [], 30)
+    def up_recv():
+        """Application bytes, b"" at end of stream, None when there is nothing to read yet."""
+        try:
+            return up.recv(65536)
+        except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+            return None
     open_c = open_u = True
     try:
-        while open_c or open_u:
-            want = ([conn] if open_c else []) + ([up] if open_u else [])
-            ready = [up] if (open_u and up.pending()) else select.select(want, [], [], 60)[0]
-            if not ready:
-                continue
+        while open_u:
+            want = ([conn] if open_c else []) + [up]
+            ready = [up] if up.pending() else select.select(want, [], [], 60)[0]
             if conn in ready:
                 data = conn.recv(65536)
                 if data:
-                    note("game->server", data); up.sendall(data)
+                    note("game->server", data); up_send(data)
                 else:
                     open_c = False
-                    try: up.shutdown(socket.SHUT_WR)
-                    except OSError: pass
             if up in ready:
-                data = up.recv(65536)
+                data = up_recv()
                 if data:
                     note("server->game", data); conn.sendall(data)
-                else:
+                elif data == b"":
                     open_u = False
-                    try: conn.shutdown(socket.SHUT_WR)
-                    except OSError: pass
-                    break
     except (OSError, ssl.SSLError) as e:
         log(f, f"c{n} ended: {e}")
     for s in (conn, up):
