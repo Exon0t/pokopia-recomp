@@ -17,6 +17,7 @@ namespace nxrt::services::netsvc::cloud {
 bool enabled();                 // [net] cloud_server is an IPv4 address
 uint32_t server_ip();           // host order
 uint16_t gateway_port();        // guest port 443 at server_ip connects to 127.0.0.1:this instead (0 = direct)
+uint16_t storage_port();        // [net] cloud_storage_port: nn::ssl connections go to server_ip:this in plain HTTP (0 = use the gateway)
 bool is_cloud_name(const std::string& host);
 const std::vector<uint8_t>& ca_der();   // [net] cloud_ca: the DER certificate the game should trust (empty: none)
 
